@@ -125,7 +125,7 @@ def _infer_target_line(question: str, plan_df: pd.DataFrame, question_date: str)
 
 
 # ========================================================================
-# 1~3단계: 데이터 수사
+# 1~3단계: 데이터 분석
 # ========================================================================
 
 def step1_list_current_stock(plan_df: pd.DataFrame, target_date: str, target_line: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -351,7 +351,7 @@ def build_ai_fact_report(
     op_kr = "감축" if operation_mode == "reduce" else "증량"
 
     fact = []
-    fact.append("### 📊 Python 수사 완료 (검증된 팩트)")
+    fact.append("### 📊 Python 분석 완료 (검증된 팩트)")
     fact.append(f"- 대상: {target_date} {target_line}")
     fact.append(f"- 목표: {op_kr} {operation_qty:,}개")
     fact.append("")
@@ -907,9 +907,9 @@ def generate_full_report(
     final_qty = current_qty - moved_total if operation_mode == "reduce" else current_qty + moved_total
 
     report = []
-    report.append(f"# 📊 {question_date} {target_line} 하이브리드 수사 보고서")
+    report.append(f"# 📊 {question_date} {target_line} 하이브리드 분석 보고서")
     report.append("")
-    report.append("## 🔍 수사 방식")
+    report.append("## 🔍 분석 방식")
     report.append(f"- 전략 수립: {strategy_source}")
     report.append(f"- 분석 기준일: {today_str}")
     report.append("")
@@ -1157,7 +1157,7 @@ def ask_professional_scheduler(
     achievement = (moved_total / operation_qty * 100) if operation_qty else 0
 
     if achievement >= 90:
-        status = "[OK] 하이브리드 수사 완료 (목표 90% 이상)"
+        status = "[OK] 하이브리드 분석 완료 (목표 90% 이상)"
         success = True
     else:
         status = f"[WARN] 조치 완료(미달) - 달성률 {achievement:.1f}%"
