@@ -1,14 +1,17 @@
 """
-hybrid.py
+hybrid2.py
 - 2026년 1월 대응용 하이브리드 엔진 (Python 분석 + AI 전략 + Python 검증 + Python 폴백)
 - app (3).py 호출 시그니처 완전 호환
+
+✅ FIX 포함:
+- step3_analyze_destination_capacity()에서 "같은날 같은라인" (예: 2026-01-21_조립1) CAPA도 capa_status에 넣도록 수정
+  → increase 시 목적지가 question_date_target_line인 경우 "목적지 CAPA 정보 없음"으로 전량 탈락하던 문제 해결
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -232,52 +235,55 @@ def step2_calculate_cumulative_slack(plan_df: pd.DataFrame, stock_result: Dict[s
     return items_with_slack
 
 
-def step3_analyze_destination_capacity(plan_df: pd.DataFrame, target_date: str, target_line: str, capa_limits: Dict[str, int]) -> Dict[str, Dict[str, Any]]:
+def step3_analyze_destination_capacity(
+    plan_df: pd.DataFrame,
+    target_date: str,
+    target_line: str,
+    capa_limits: Dict[str, int],
+) -> Dict[str, Dict[str, Any]]:
     """
     CAPA 현황:
-    - 같은날 타라인(조립1/2/3)
+    - ✅ 같은날: 조립1/2/3 모두 (target_line 포함)  ← FIX
     - 동일라인 미래 가동일(최대 10일)
     """
     future_workdays = get_workdays_from_db(plan_df, target_date, direction="future", days_count=10)
-    capa_status = {}
+    capa_status: Dict[str, Dict[str, Any]] = {}
 
+    # ✅ [FIX] 같은날 CAPA: 모든 라인 포함 (target_line 포함)
     for line in ["조립1", "조립2", "조립3"]:
-        # 같은 날 타라인
-        if line != target_line:
-            cur = plan_df[(plan_df["plan_date"] == target_date) & (plan_df["line"] == line)]["qty_1차"].sum()
-            cur = int(cur) if pd.notna(cur) else 0
-            remaining = int(capa_limits[line] - cur)
-            capa_status[f"{target_date}_{line}"] = {
-                "date": target_date,
-                "line": line,
-                "current": cur,
-                "remaining": remaining,
-                "max": capa_limits[line],
-                "usage_rate": (cur / capa_limits[line] * 100) if capa_limits[line] else 0,
-            }
+        cur = plan_df[(plan_df["plan_date"] == target_date) & (plan_df["line"] == line)]["qty_1차"].sum()
+        cur = int(cur) if pd.notna(cur) else 0
+        remaining = int(capa_limits[line] - cur)
+        capa_status[f"{target_date}_{line}"] = {
+            "date": target_date,
+            "line": line,
+            "current": cur,
+            "remaining": remaining,
+            "max": capa_limits[line],
+            "usage_rate": (cur / capa_limits[line] * 100) if capa_limits[line] else 0,
+        }
 
-        # 동일라인 미래
-        if line == target_line:
-            if not future_workdays:
-                # 보강: is_workday가 없거나 future list가 빈 경우, 10일 검색
-                base = _safe_date(target_date)
-                for i in range(1, 11):
-                    d = (base + timedelta(days=i)).strftime("%Y-%m-%d")
-                    if is_workday_in_db(plan_df, d):
-                        future_workdays.append(d)
+    # 동일라인 미래
+    if not future_workdays:
+        # 보강: is_workday가 없거나 future list가 빈 경우, 10일 검색
+        base = _safe_date(target_date)
+        for i in range(1, 11):
+            d = (base + timedelta(days=i)).strftime("%Y-%m-%d")
+            if is_workday_in_db(plan_df, d):
+                future_workdays.append(d)
 
-            for d in future_workdays:
-                cur = plan_df[(plan_df["plan_date"] == d) & (plan_df["line"] == line)]["qty_1차"].sum()
-                cur = int(cur) if pd.notna(cur) else 0
-                remaining = int(capa_limits[line] - cur)
-                capa_status[f"{d}_{line}"] = {
-                    "date": d,
-                    "line": line,
-                    "current": cur,
-                    "remaining": remaining,
-                    "max": capa_limits[line],
-                    "usage_rate": (cur / capa_limits[line] * 100) if capa_limits[line] else 0,
-                }
+    for d in future_workdays:
+        cur = plan_df[(plan_df["plan_date"] == d) & (plan_df["line"] == target_line)]["qty_1차"].sum()
+        cur = int(cur) if pd.notna(cur) else 0
+        remaining = int(capa_limits[target_line] - cur)
+        capa_status[f"{d}_{target_line}"] = {
+            "date": d,
+            "line": target_line,
+            "current": cur,
+            "remaining": remaining,
+            "max": capa_limits[target_line],
+            "usage_rate": (cur / capa_limits[target_line] * 100) if capa_limits[target_line] else 0,
+        }
 
     return capa_status
 
@@ -390,7 +396,7 @@ def step5_ask_ai_strategy(
 
     if operation_mode == "reduce":
         operation_desc = "감축"
-        strategy_hint = f"""
+        strategy_hint = """
 우선순위:
 1) 같은 날 타라인 이송 (remaining > 0인 곳만)
    - T6: 타라인 가능
@@ -400,7 +406,7 @@ def step5_ask_ai_strategy(
 """
     else:
         operation_desc = "증량"
-        strategy_hint = f"""
+        strategy_hint = """
 우선순위:
 1) 같은 날 타라인에서 가져오기 (T6만 타라인 이동 가능)
 2) 같은 라인 미래 날짜에서 당기기 (납기 위반 없는 범위)
@@ -488,7 +494,7 @@ def step6_validate_ai_strategy(
             violations.append(f"❌ [{idx}] {item_name}: qty가 0 이하")
             continue
 
-        # 누적 납기 여유 (감축 이동/연기) 기준 검증: qty는 max_movable 이하
+        # 누적 납기 여유 기준 검증: qty는 max_movable 이하
         if qty > int(item["max_movable"]):
             violations.append(f"❌ [{idx}] {item_name}: 누적 여유 초과 (요청 {qty:,} > 최대 {item['max_movable']:,})")
             continue
@@ -566,8 +572,6 @@ def step6_validate_ai_strategy(
 
 # ========================================================================
 # Python 폴백 전략 (AI 실패/부족 시)
-# - reduce: "빼기" 위해 타라인/미래로 이동
-# - increase: "늘리기" 위해 타라인(같은날) 또는 미래(같은라인)에서 당김
 # ========================================================================
 
 def _pick_qty_plts(qty: int, plt: int) -> int:
@@ -596,8 +600,6 @@ def python_fallback_reduce(
     if remain <= 0:
         return [], []
 
-    # 우선순위: T6 -> 타라인, A2XX -> 조립2(가능하면), 나머지 -> 미래
-    # 후보 정렬: buffer_days 큰 것부터(여유 큰거 먼저)
     candidates = sorted(constraint_info, key=lambda x: x.get("buffer_days", 0), reverse=True)
 
     # [1] 같은날 타라인 이송
@@ -614,7 +616,6 @@ def python_fallback_reduce(
         is_t6 = item["is_t6"]
         is_a2xx = item["is_a2xx"]
 
-        possible_lines = []
         if is_t6:
             possible_lines = [l for l in ["조립1", "조립2", "조립3"] if l != target_line]
         elif is_a2xx:
@@ -622,7 +623,6 @@ def python_fallback_reduce(
         else:
             continue  # 전용은 타라인 금지
 
-        # 타라인 중 remaining 큰 곳부터
         dests = []
         for dl in possible_lines:
             key = f"{question_date}_{dl}"
@@ -673,7 +673,6 @@ def python_fallback_reduce(
             if movable < plt:
                 continue
 
-            # 전용/잔여품목 포함 (미래 동일라인만)
             for d in future_days:
                 if remain <= 0:
                     break
@@ -732,7 +731,6 @@ def python_fallback_increase(
         return [], []
 
     # [1] 같은날 타라인 -> target_line (T6만)
-    # plan_df에서 같은날 타라인의 T6 계획 qty_1차를 source로 삼음
     date_df = plan_df[plan_df["plan_date"] == question_date].copy()
     if not date_df.empty:
         for src_line in ["조립1", "조립2", "조립3"]:
@@ -782,7 +780,6 @@ def python_fallback_increase(
             if future.empty:
                 continue
 
-            # 당김은 납기 여유(buffer_days) 검증이 필요하므로 constraint_info 기반으로 제한
             movable_map = {x["name"]: x for x in constraint_info}
             for _, row in future.iterrows():
                 if remain <= 0:
@@ -793,7 +790,7 @@ def python_fallback_increase(
                     continue
                 item = movable_map[name]
                 plt = int(item["plt"])
-                max_movable = int(item["max_movable"])  # 당김도 결국 "가능범위" 내에서만
+                max_movable = int(item["max_movable"])
 
                 src_qty = int(row.get("qty_1차", 0) or 0)
                 take = min(remain, src_qty, max_movable)
