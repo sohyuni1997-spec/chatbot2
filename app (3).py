@@ -1,16 +1,12 @@
-# app.py  (3) 버전: "뷰(표시)만" 남긴 최소 app
-# ✅ 전제: hybrid_merged.py의 ask_professional_scheduler가 "구조화 결과(dict)"를 반환하도록 바뀐 상태
-#    (즉, app.py에서 report 정규식 파싱/문구 치환/조치계획 파싱을 더 이상 하지 않음)
-#
-# ✅ legacy.py는 그대로 사용 (조회 모드 로직 그대로)
-# ✅ secrets/환경변수로만 키 관리
-# ✅ 오른쪽 30% 패널 가독성: KPI + 조정안 + (접기)상세
-# ✅ 사이드바 접기(«) 버튼 제거
+# app.py  (최소 수정 반영 전체본)
+# - ✅ 변경 포인트: render_hybrid_summary_ui() 안의 need_qty / moved_qty 정규식 2줄만 교체
+#   need_qty  = _pick_int(r"필요 (?:감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
+#   moved_qty = _pick_int(r"실제 (?:감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
 
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Union
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -84,7 +80,7 @@ button[kind="header"] { display: none; }
 )
 
 
-# ==================== Helpers ====================
+# ==================== Data Helpers ====================
 @st.cache_data(ttl=600)
 def fetch_data(target_date: Optional[str] = None):
     """target_date 기준 ±10일 범위 로드 + product_map/plt_map 생성"""
@@ -113,9 +109,13 @@ def fetch_data(target_date: Optional[str] = None):
         if plan_df.empty:
             return plan_df, hist_df, {}, {}
 
-        plan_df["name_clean"] = plan_df["product_name"].astype(str).str.replace(r"\s+", "", regex=True).str.strip()
+        plan_df["name_clean"] = (
+            plan_df["product_name"].astype(str).str.replace(r"\s+", "", regex=True).str.strip()
+        )
         plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
         product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
+
+        # T6는 라인 제한 없이 이동 가능 처리
         for k in list(product_map.keys()):
             if "T6" in str(k).upper():
                 product_map[k] = ["조립1", "조립2", "조립3"]
@@ -158,6 +158,29 @@ def is_adjustment_mode(prompt: str, target_date: Optional[str]) -> bool:
     )
 
 
+# ==================== Parsing Helpers ====================
+def _pick_int(pattern: str, text: str, default: Optional[int] = None) -> Optional[int]:
+    m = re.search(pattern, text, flags=re.IGNORECASE)
+    if not m:
+        return default
+    s = m.group(1).replace(",", "").strip()
+    try:
+        return int(s)
+    except Exception:
+        return default
+
+
+def _pick_float(pattern: str, text: str, default: Optional[float] = None) -> Optional[float]:
+    m = re.search(pattern, text, flags=re.IGNORECASE)
+    if not m:
+        return default
+    s = m.group(1).replace(",", "").strip()
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
 def _badge(status: str):
     up = status.upper()
     if "OK" in up:
@@ -168,84 +191,99 @@ def _badge(status: str):
         st.error(status)
 
 
-def render_hybrid_view(result: Dict[str, Any]):
+def _parse_moves_from_report(report: str) -> List[Dict[str, Any]]:
     """
-    ✅ hybrid_merged.py가 반환한 구조화 result로만 화면 그리기
-    기대 포맷 예시:
-    result = {
-      "status": "[OK] ...",
-      "success": True,
-      "title": "2026-01-21 조립1 하이브리드 분석 보고서",
-      "kpi": {"current":2600,"target":2950,"need":350,"actual":375,"achv":107.1},
-      "moves": [{"item":"WL LHD","qty":200,"plt":1,"from":"2026-01-21_조립2","to":"2026-01-21_조립1","reason":"..."}],
-      "messages": ["⚠️ ...", "✅ ..."],
-      "report_md": "원문(마크다운)",
-      "capa": {"daily": [...]}  # optional
-    }
+    조치계획(이동/조정안) 텍스트를 최대한 안전하게 파싱.
+    (형식이 바뀔 수 있으니 실패해도 UI가 깨지지 않게 'best effort')
     """
-    status = str(result.get("status", "")).strip()
-    title = str(result.get("title", "")).strip()
-    kpi = result.get("kpi", {}) or {}
-    moves = result.get("moves", []) or []
-    messages = result.get("messages", []) or []
-    report_md = result.get("report_md", "") or ""
+    moves: List[Dict[str, Any]] = []
+
+    # 예시 라인(가정):
+    # - WL LHD: 200개 (1PLT) | 2026-01-21_조립2 -> 2026-01-21_조립1
+    line_pat = re.compile(
+        r"-\s*(?P<item>.+?)\s*:\s*(?P<qty>\d[\d,]*)\s*개.*?(?P<plt>\d+)\s*PLT.*?\|\s*(?P<from>\d{4}-\d{2}-\d{2}_[^ ]+)\s*->\s*(?P<to>\d{4}-\d{2}-\d{2}_[^ \n]+)",
+        flags=re.IGNORECASE,
+    )
+
+    for m in line_pat.finditer(report):
+        moves.append(
+            {
+                "품목": m.group("item").strip(),
+                "수량": int(m.group("qty").replace(",", "")),
+                "PLT": int(m.group("plt")),
+                "FROM": m.group("from").strip(),
+                "TO": m.group("to").strip(),
+            }
+        )
+    return moves
+
+
+# ==================== UI Renderers ====================
+def render_hybrid_summary_ui(report: str):
+    """
+    기존(레거시) 하이브리드 보고서 텍스트 기반 UI
+    - ✅ 이번 요청의 '최소 수정'은 need_qty / moved_qty 정규식 2줄만 변경
+    """
+
+    title = ""
+    m = re.search(r"📊\s*(.+)", report)
+    if m:
+        title = m.group(1).strip()
+
+    status = ""
+    m = re.search(r"(\[[A-Z]+\][^\n]+)", report)
+    if m:
+        status = m.group(1).strip()
 
     if status:
         _badge(status)
     if title:
         st.markdown(f"### 📊 {title}")
 
+    # KPI 파싱 (보고서 형식에 맞춰 best effort)
+    current_qty = _pick_int(r"현재 생산량:\s*([\d,]+)개", report)
+    target_qty = _pick_int(r"목표 생산량:\s*([\d,]+)개", report)
+
+    # ✅✅✅ 여기 2줄이 '최소 수정' 반영 포인트입니다
+    need_qty  = _pick_int(r"필요 (?:감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
+    moved_qty = _pick_int(r"실제 (?:감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
+    # ✅✅✅
+
+    achv = _pick_float(r"달성률:\s*([\d.]+)\s*%", report)
+
     # KPI (2x2)
     c1, c2 = st.columns(2)
-    c1.metric("현재", f"{int(kpi.get('current')):,}개" if kpi.get("current") is not None else "-")
-    c2.metric("목표", f"{int(kpi.get('target')):,}개" if kpi.get("target") is not None else "-")
+    c1.metric("현재", f"{current_qty:,}개" if current_qty is not None else "-")
+    c2.metric("목표", f"{target_qty:,}개" if target_qty is not None else "-")
     c3, c4 = st.columns(2)
-    c3.metric("필요", f"{int(kpi.get('need')):,}개" if kpi.get("need") is not None else "-")
-    c4.metric("달성률", f"{float(kpi.get('achv')):.1f}%" if kpi.get("achv") is not None else "-")
+    c3.metric("필요", f"{need_qty:,}개" if need_qty is not None else "-")
+    c4.metric("달성률", f"{achv:.1f}%" if achv is not None else "-")
 
     st.divider()
 
     # 조정안
     st.subheader("🧾 최종 조정안")
+    moves = _parse_moves_from_report(report)
     if moves:
         dfm = pd.DataFrame(moves)
-
-        # 컬럼 표준화(없어도 안전)
-        rename_map = {
-            "item": "품목",
-            "qty": "수량",
-            "plt": "PLT",
-            "from": "FROM",
-            "to": "TO",
-            "reason": "사유",
-        }
-        dfm = dfm.rename(columns=rename_map)
-
         show_cols = [c for c in ["품목", "수량", "PLT", "FROM", "TO"] if c in dfm.columns]
-        if show_cols:
-            st.dataframe(dfm[show_cols].head(8), use_container_width=True, hide_index=True)
-        else:
-            st.dataframe(dfm.head(8), use_container_width=True, hide_index=True)
+        st.dataframe(dfm[show_cols].head(8), use_container_width=True, hide_index=True)
 
-        with st.expander("사유/전체 보기"):
+        with st.expander("전체 보기"):
             st.dataframe(dfm, use_container_width=True, hide_index=True)
     else:
-        st.info("적용 가능한 조정안이 없습니다.")
+        st.info("조정안 파싱 결과가 없습니다. (보고서 형식이 바뀌었을 수 있어요)")
 
-    # 메시지/검증
+    # 검증/메모(있으면)
     with st.expander("⚠️ 검증/메모"):
-        if messages:
-            for m in messages:
-                st.markdown(f"- {m}")
-        else:
-            st.caption("표시할 메시지가 없습니다.")
+        if moved_qty is not None and need_qty is not None:
+            st.markdown(f"- 필요량: **{need_qty:,}개**")
+            st.markdown(f"- 실제 조정량: **{moved_qty:,}개**")
+        st.caption("기타 검증 메시지는 보고서 원문에서 확인하세요.")
 
     # 원문
     with st.expander("📄 원문 리포트"):
-        if report_md:
-            st.markdown(report_md)
-        else:
-            st.caption("원문 리포트가 제공되지 않았습니다.")
+        st.markdown(report)
 
 
 def render_capa_chart(plan_df: pd.DataFrame):
@@ -325,6 +363,7 @@ with st.sidebar:
 **예시(조정)**
 - `2026-01-23 조립1 공정감사로 1일 CAPA의 70%만 생산`
 - `2026-01-21 조립1 (T6) 샘플 350개 추가`
+- `2026-01-21 조립1 CAPA 70%로 감축`
 
 **예시(조회)**
 - `내일 조립2에 T6 계획 있어?`
@@ -369,7 +408,7 @@ if prompt:
                         st.error("❌ 데이터를 불러올 수 없습니다. 날짜/DB 테이블/기간을 확인해주세요.")
                         st.session_state.messages.append({"role": "assistant", "content": "❌ 데이터 로드 실패"})
                     else:
-                        # ✅ 여기서부터는 '구조화 결과'를 받아 그대로 표시
+                        # hybrid_merged 반환 형태가 (dict / str / tuple) 섞여도 UI가 안죽게 방어
                         result = ask_professional_scheduler(
                             question=prompt,
                             plan_df=plan_df,
@@ -383,17 +422,39 @@ if prompt:
                             genai_key=GENAI_KEY,
                         )
 
-                        # (안전) 혹시 기존 튜플 반환이면 친절하게 안내
-                        if not isinstance(result, dict):
-                            st.error(
-                                "❌ 현재 hybrid_merged.py가 dict를 반환하지 않고 있어요.\n\n"
-                                "3) app.py는 hybrid 결과를 구조화(dict)로 받는 전제입니다.\n"
-                                "먼저 hybrid_merged.py를 수정해서 dict를 반환하도록 바꿔야 해요."
-                            )
+                        # 1) dict(구조화 결과)면 그대로 표시
+                        if isinstance(result, dict):
+                            # 최소한의 표시(구조화 결과 UI가 별도로 있으면 여기서 교체)
+                            status = str(result.get("status", "")).strip()
+                            title = str(result.get("title", "")).strip()
+                            if status:
+                                _badge(status)
+                            if title:
+                                st.markdown(f"### 📊 {title}")
+                            # 원문/리포트가 있으면 레거시 요약 UI로도 표시 가능
+                            report_md = result.get("report_md", "") or ""
+                            if report_md:
+                                render_hybrid_summary_ui(report_md)
+                            else:
+                                st.info("구조화 결과(dict)만 있고 report_md가 없어 요약 UI를 생략했습니다.")
+                        # 2) 문자열이면 레거시 요약 UI
+                        elif isinstance(result, str):
+                            render_hybrid_summary_ui(result)
+                        # 3) 튜플이면 (status, report) 같은 케이스로 처리
+                        elif isinstance(result, (tuple, list)) and len(result) >= 1:
+                            report = ""
+                            # 가장 긴 str을 report로 간주
+                            strs = [x for x in result if isinstance(x, str)]
+                            if strs:
+                                report = max(strs, key=len)
+                            if report:
+                                render_hybrid_summary_ui(report)
+                            else:
+                                st.error("❌ hybrid 결과를 해석할 수 없습니다. (tuple/list 안에 report 문자열이 없음)")
                         else:
-                            render_hybrid_view(result)
+                            st.error("❌ hybrid 결과 타입을 해석할 수 없습니다. (dict/str/tuple 예상)")
 
-                    # (기존 유지) CAPA 차트
+                    # CAPA 차트(기존 유지)
                     if not plan_df.empty:
                         render_capa_chart(plan_df)
 
