@@ -3,9 +3,13 @@ hybrid2.py
 - 2026년 1월 대응용 하이브리드 엔진 (Python 분석 + AI 전략 + Python 검증 + Python 폴백)
 - app (3).py 호출 시그니처 완전 호환
 
-✅ FIX 포함:
-- step3_analyze_destination_capacity()에서 "같은날 같은라인" (예: 2026-01-21_조립1) CAPA도 capa_status에 넣도록 수정
+✅ FIX 1) step3_analyze_destination_capacity()
+- "같은날 같은라인" (예: 2026-01-21_조립1) CAPA도 capa_status에 포함
   → increase 시 목적지가 question_date_target_line인 경우 "목적지 CAPA 정보 없음"으로 전량 탈락하던 문제 해결
+
+✅ FIX 2) generate_full_report()
+- 최종 조치 계획 출력 시, 동일 item/from/to는 합산해서 1줄로 표시
+  → 같은 내용이 1PLT씩 여러 줄로 쪼개져 보이던 문제 개선(표시만 변경, 계산 로직 불변)
 """
 
 from __future__ import annotations
@@ -776,7 +780,11 @@ def python_fallback_increase(
             if not is_workday_in_db(plan_df, d):
                 continue
 
-            future = plan_df[(plan_df["plan_date"] == d) & (plan_df["line"] == target_line) & (plan_df["qty_1차"] > 0)]
+            future = plan_df[
+                (plan_df["plan_date"] == d)
+                & (plan_df["line"] == target_line)
+                & (plan_df["qty_1차"] > 0)
+            ]
             if future.empty:
                 continue
 
@@ -840,6 +848,57 @@ def generate_full_report(
     target_line: str,
     extra_notes: List[str],
 ) -> str:
+    def _merge_moves(moves: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        같은 item/from/to 이동은 합산해서 1줄로 보여주기 (표시용)
+        - qty 합산
+        - plt(팔레트 수) 합산
+        - reason이 다르면 '; '로 합침(중복 방지)
+        - adjusted/original_qty는 하나라도 있으면 표시(원본_qty는 합산)
+        """
+        if not moves:
+            return []
+
+        merged: Dict[tuple, Dict[str, Any]] = {}
+
+        for m in moves:
+            key = (m.get("item"), m.get("from"), m.get("to"))
+            qty = int(m.get("qty", 0) or 0)
+            plt = int(m.get("plt", 0) or 0)
+            reason = str(m.get("reason", "") or "")
+            adjusted = bool(m.get("adjusted", False))
+            original_qty = m.get("original_qty", None)
+
+            if key not in merged:
+                merged[key] = {
+                    "item": m.get("item"),
+                    "from": m.get("from"),
+                    "to": m.get("to"),
+                    "qty": qty,
+                    "plt": plt,
+                    "reason": reason,
+                    "adjusted": adjusted,
+                    "original_qty": int(original_qty) if original_qty is not None else None,
+                }
+            else:
+                merged[key]["qty"] += qty
+                merged[key]["plt"] += plt
+
+                if reason and reason not in (merged[key]["reason"] or ""):
+                    if merged[key]["reason"]:
+                        merged[key]["reason"] += "; " + reason
+                    else:
+                        merged[key]["reason"] = reason
+
+                merged[key]["adjusted"] = merged[key]["adjusted"] or adjusted
+                if original_qty is not None:
+                    if merged[key]["original_qty"] is None:
+                        merged[key]["original_qty"] = int(original_qty)
+                    else:
+                        merged[key]["original_qty"] += int(original_qty)
+
+        return sorted(merged.values(), key=lambda x: int(x.get("qty", 0)), reverse=True)
+
     op_kr = "감축" if operation_mode == "reduce" else "증량"
     moved_total = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
     achievement = (moved_total / operation_qty * 100) if operation_qty > 0 else 0
@@ -902,14 +961,19 @@ def generate_full_report(
         report.append("✅ 검증 항목 통과")
     report.append("")
 
-    report.append(f"## 🧾 최종 조치 계획 ({len(final_moves)}개)")
-    if final_moves:
-        for i, m in enumerate(final_moves, 1):
+    # ✅ [FIX] 최종 조치 계획: 동일 move 합산 표시
+    merged_moves = _merge_moves(final_moves)
+
+    report.append(f"## 🧾 최종 조치 계획 ({len(merged_moves)}개)")
+    if merged_moves:
+        for i, m in enumerate(merged_moves, 1):
             adj = ""
             if m.get("adjusted"):
-                adj = f" ⚠️(조정: {m.get('original_qty', 0):,}→{m['qty']:,})"
+                oq = m.get("original_qty", 0) or 0
+                adj = f" ⚠️(조정: {oq:,}→{m['qty']:,})"
             report.append(
-                f"{i}) {m['item']} | {m['qty']:,}개({m.get('plt','?')}PLT){adj} | {m.get('from','-')} → {m.get('to','-')} | {m.get('reason','-')}"
+                f"{i}) {m['item']} | {m['qty']:,}개({m.get('plt','?')}PLT){adj} | "
+                f"{m.get('from','-')} → {m.get('to','-')} | {m.get('reason','-')}"
             )
     else:
         report.append("❌ 승인된 조치 없음")
