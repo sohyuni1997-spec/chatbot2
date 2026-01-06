@@ -1,14 +1,16 @@
-# app.py
-# ✅ 최종 버전 (요청사항 반영 완료)
-# - secrets/환경변수로만 키 관리 (코드 하드코딩 키 없음)
-# - legacy.py는 절대 건드리지 않음 (조회 모드 흐름 그대로)
-# - 하이브리드(조정) 모드는 "오른쪽 30% 패널" 가독성용 요약 UI
-# - '수사' 완전 제거(이모지 포함 케이스까지) + 상태/문구 톤 현업 친화적으로 정리
+# app.py  (3) 버전: "뷰(표시)만" 남긴 최소 app
+# ✅ 전제: hybrid_merged.py의 ask_professional_scheduler가 "구조화 결과(dict)"를 반환하도록 바뀐 상태
+#    (즉, app.py에서 report 정규식 파싱/문구 치환/조치계획 파싱을 더 이상 하지 않음)
+#
+# ✅ legacy.py는 그대로 사용 (조회 모드 로직 그대로)
+# ✅ secrets/환경변수로만 키 관리
+# ✅ 오른쪽 30% 패널 가독성: KPI + 조정안 + (접기)상세
+# ✅ 사이드바 접기(«) 버튼 제거
 
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Dict, Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -16,23 +18,20 @@ import streamlit as st
 from supabase import create_client, Client
 import google.generativeai as genai
 
-# ✅ legacy.py는 그대로 사용
 from legacy import fetch_db_data_legacy, query_gemini_ai_legacy
 from hybrid_merged import ask_professional_scheduler
 
 
-# ==================== 환경 설정 ====================
+# ==================== 기본 설정 ====================
 st.set_page_config(page_title="생산계획 통합 시스템", page_icon="🏭", layout="wide")
 
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
-FROZEN_DAYS = 3  # 현재 앱 로직에서 직접 쓰진 않지만 유지
 TEST_MODE = True
 TODAY = datetime(2026, 1, 5).date() if TEST_MODE else datetime.now().date()
 
 
 # ==================== Secrets / Env ====================
 def _get_secret(key: str, default: str = "") -> str:
-    """secrets 우선, 없으면 환경변수. 둘 다 없으면 default."""
     try:
         v = st.secrets.get(key, None)
         if v:
@@ -67,7 +66,7 @@ if GENAI_KEY:
         pass
 
 
-# ==================== UI: 오른쪽 패널용 컴팩트 CSS ====================
+# ==================== UI CSS (컴팩트 + 사이드바 토글 제거) ====================
 st.markdown(
     """
 <style>
@@ -76,56 +75,19 @@ div[data-testid="stMetricValue"] { font-size: 1.15rem; }
 div[data-testid="stMetricLabel"] { font-size: 0.8rem; }
 div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.35rem; }
 div[data-testid="stExpander"] summary { font-weight: 650; }
+
+/* 사이드바 접기(«) 버튼 제거 */
+button[kind="header"] { display: none; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# ==================== 출력 문구 정리 (UI 전용, 엔진/legacy 무영향) ====================
-def sanitize_hybrid_words(text: str) -> str:
-    """하이브리드 화면 표시용 문구 치환 ('수사' 완전 제거 + 톤 정리)"""
-    if not text:
-        return text
-
-    replacements = [
-        # --- '수사' 완전 제거: 이모지 포함/부분 일치까지 잡기 ---
-        ("하이브리드 수사 보고서", "하이브리드 분석 보고서"),
-        ("하이브리드 수사", "하이브리드 분석"),
-        ("🔍 수사 방식", "🔍 분석 방식"),
-        ("수사 방식", "분석 방식"),
-        ("수사 진행 중", "분석 진행 중"),
-        ("수사 완료", "분석 완료"),
-        ("수사", "분석"),  # 마지막에 남는 단어까지 처리
-
-        # --- 조치/승인 톤(오해 소지 완화) ---
-        ("조치 완료(미달)", "계획 조정 완료(미달)"),
-        ("승인된 조치 없음", "적용 가능한 조정안 없음"),
-        ("최종 조치 계획", "최종 조정안"),
-        ("조치 계획", "조정안"),
-        ("승인된 조치", "적용된 조정안"),
-        ("조치 불필요", "조정 불필요"),
-
-        # --- 검증/표현 톤 ---
-        ("Python 검증 결과", "규칙 검증 결과"),
-        ("검증 항목 통과", "규칙 검증 통과"),
-        ("목적지 CAPA 정보 없음", "대상 CAPA 정보 없음"),
-    ]
-
-    for a, b in replacements:
-        text = text.replace(a, b)
-
-    return text
-
-
-# ==================== 데이터 로드 ====================
+# ==================== Helpers ====================
 @st.cache_data(ttl=600)
-def fetch_data(target_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any], Dict[str, Any]]:
-    """
-    target_date 기준 ±10일 범위 데이터 로드
-    - production_plan_2026_01
-    - production_investigation
-    """
+def fetch_data(target_date: Optional[str] = None):
+    """target_date 기준 ±10일 범위 로드 + product_map/plt_map 생성"""
     if not supabase:
         return pd.DataFrame(), pd.DataFrame(), {}, {}
 
@@ -148,18 +110,17 @@ def fetch_data(target_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Data
         hist_res = supabase.table("production_investigation").select("*").execute()
         hist_df = pd.DataFrame(hist_res.data)
 
-        if not plan_df.empty:
-            plan_df["name_clean"] = plan_df["product_name"].apply(
-                lambda x: re.sub(r"\s+", "", str(x)).strip()
-            )
-            plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
-            product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
-            for k in list(product_map.keys()):
-                if "T6" in str(k).upper():
-                    product_map[k] = ["조립1", "조립2", "조립3"]
-            return plan_df, hist_df, product_map, plt_map
+        if plan_df.empty:
+            return plan_df, hist_df, {}, {}
 
-        return pd.DataFrame(), pd.DataFrame(), {}, {}
+        plan_df["name_clean"] = plan_df["product_name"].astype(str).str.replace(r"\s+", "", regex=True).str.strip()
+        plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
+        product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
+        for k in list(product_map.keys()):
+            if "T6" in str(k).upper():
+                product_map[k] = ["조립1", "조립2", "조립3"]
+
+        return plan_df, hist_df, product_map, plt_map
 
     except Exception as e:
         st.error(f"데이터 로드 실패: {e}")
@@ -167,13 +128,7 @@ def fetch_data(target_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Data
 
 
 def extract_date(text: str) -> Optional[str]:
-    """
-    질문에서 날짜 추출 -> YYYY-MM-DD
-    지원:
-    - 1/23
-    - 1월 23일
-    - 2026-01-23
-    """
+    """질문에서 날짜 추출 -> YYYY-MM-DD"""
     m = re.search(r"(202[0-9])-(\d{1,2})-(\d{1,2})", text)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -192,118 +147,169 @@ def extract_date(text: str) -> Optional[str]:
     return None
 
 
-# ==================== Hybrid UI helpers (표현만 개선) ====================
-def _pick_int(pattern: str, text: str) -> Optional[int]:
-    m = re.search(pattern, text)
-    if not m:
-        return None
-    return int(m.group(1).replace(",", ""))
+def is_adjustment_mode(prompt: str, target_date: Optional[str]) -> bool:
+    if not target_date:
+        return False
+    return (
+        any(line in prompt for line in ["조립1", "조립2", "조립3"])
+        or re.search(r"\d+\s*%", prompt) is not None
+        or "CAPA" in prompt.upper()
+        or any(k in prompt for k in ["줄여", "감축", "증량", "샘플", "추가", "생산", "공정감사", "감사"])
+    )
 
 
-def _pick_float(pattern: str, text: str) -> Optional[float]:
-    m = re.search(pattern, text)
-    if not m:
-        return None
-    return float(m.group(1))
-
-
-def _extract_moves_from_report(report: str) -> List[Dict[str, Any]]:
-    """
-    report 문자열에서 '최종 조정안' 섹션만 파싱
-    (엔진 수정 없이 app만 바꾸기 위해 사용)
-    """
-    m = re.search(r"## 🧾 (?:최종 조정안|최종 조치 계획).*?\n(.*?)(?:\n## |\Z)", report, flags=re.S)
-    if not m:
-        return []
-
-    body = m.group(1).strip()
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-
-    if lines and ("적용 가능한 조정안 없음" in lines[0] or "승인된 조치 없음" in lines[0]):
-        return []
-
-    moves: List[Dict[str, Any]] = []
-    for ln in lines:
-        ln2 = re.sub(r"^\d+\)\s*", "", ln)
-        parts = [p.strip() for p in ln2.split("|")]
-        if len(parts) < 4:
-            continue
-
-        item = parts[0]
-        qty_plt = parts[1]
-        route = parts[2]
-        reason = parts[3]
-
-        qty = _pick_int(r"(\d[\d,]*)개", qty_plt)
-        plt = _pick_int(r"\((\d[\d,]*)PLT\)", qty_plt)
-
-        from_loc, to_loc = None, None
-        if "→" in route:
-            from_loc, to_loc = [x.strip() for x in route.split("→", 1)]
-
-        moves.append({"품목": item, "수량": qty, "PLT": plt, "FROM": from_loc, "TO": to_loc, "사유": reason})
-
-    return moves
-
-
-def render_hybrid_summary_ui(report: str, status: str) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int], Optional[float]]:
-    """하이브리드 결과를 요약 UI로 표시 (원문은 expander)"""
-
-    # 상태 배지(OK/WARN/ERROR)
-    if "OK" in status:
+def _badge(status: str):
+    up = status.upper()
+    if "OK" in up:
         st.success(status)
-    elif "WARN" in status:
+    elif "WARN" in up:
         st.warning(status)
     else:
         st.error(status)
 
-    # KPI 파싱
-    current_qty = _pick_int(r"현재 생산량:\s*\*\*(\d[\d,]*)개\*\*", report)
-    target_qty = _pick_int(r"목표 생산량:\s*\*\*(\d[\d,]*)개\*\*", report)
-    need_qty = _pick_int(r"필요 (감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
-    moved_qty = _pick_int(r"실제 (감축|증량)량:\s*\*\*(\d[\d,]*)개\*\*", report)
-    achv = _pick_float(r"목표 달성률:\s*\*\*([\d\.]+)%\*\*", report)
+
+def render_hybrid_view(result: Dict[str, Any]):
+    """
+    ✅ hybrid_merged.py가 반환한 구조화 result로만 화면 그리기
+    기대 포맷 예시:
+    result = {
+      "status": "[OK] ...",
+      "success": True,
+      "title": "2026-01-21 조립1 하이브리드 분석 보고서",
+      "kpi": {"current":2600,"target":2950,"need":350,"actual":375,"achv":107.1},
+      "moves": [{"item":"WL LHD","qty":200,"plt":1,"from":"2026-01-21_조립2","to":"2026-01-21_조립1","reason":"..."}],
+      "messages": ["⚠️ ...", "✅ ..."],
+      "report_md": "원문(마크다운)",
+      "capa": {"daily": [...]}  # optional
+    }
+    """
+    status = str(result.get("status", "")).strip()
+    title = str(result.get("title", "")).strip()
+    kpi = result.get("kpi", {}) or {}
+    moves = result.get("moves", []) or []
+    messages = result.get("messages", []) or []
+    report_md = result.get("report_md", "") or ""
+
+    if status:
+        _badge(status)
+    if title:
+        st.markdown(f"### 📊 {title}")
 
     # KPI (2x2)
     c1, c2 = st.columns(2)
-    c1.metric("현재", f"{current_qty:,}개" if current_qty is not None else "-")
-    c2.metric("목표", f"{target_qty:,}개" if target_qty is not None else "-")
-
+    c1.metric("현재", f"{int(kpi.get('current')):,}개" if kpi.get("current") is not None else "-")
+    c2.metric("목표", f"{int(kpi.get('target')):,}개" if kpi.get("target") is not None else "-")
     c3, c4 = st.columns(2)
-    c3.metric("필요", f"{need_qty:,}개" if need_qty is not None else "-")
-    c4.metric("달성률", f"{achv:.1f}%" if achv is not None else "-")
+    c3.metric("필요", f"{int(kpi.get('need')):,}개" if kpi.get("need") is not None else "-")
+    c4.metric("달성률", f"{float(kpi.get('achv')):.1f}%" if kpi.get("achv") is not None else "-")
 
     st.divider()
 
     # 조정안
     st.subheader("🧾 최종 조정안")
-    moves = _extract_moves_from_report(report)
     if moves:
         dfm = pd.DataFrame(moves)
-        show_cols = ["품목", "수량", "PLT", "FROM", "TO"]
-        st.dataframe(dfm[show_cols].head(8), use_container_width=True, hide_index=True)
+
+        # 컬럼 표준화(없어도 안전)
+        rename_map = {
+            "item": "품목",
+            "qty": "수량",
+            "plt": "PLT",
+            "from": "FROM",
+            "to": "TO",
+            "reason": "사유",
+        }
+        dfm = dfm.rename(columns=rename_map)
+
+        show_cols = [c for c in ["품목", "수량", "PLT", "FROM", "TO"] if c in dfm.columns]
+        if show_cols:
+            st.dataframe(dfm[show_cols].head(8), use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(dfm.head(8), use_container_width=True, hide_index=True)
 
         with st.expander("사유/전체 보기"):
             st.dataframe(dfm, use_container_width=True, hide_index=True)
     else:
         st.info("적용 가능한 조정안이 없습니다.")
 
-    # 검증/메모
-    with st.expander("⚠️ 검증 메시지 / 메모"):
-        v = re.search(r"## ✅ \[6단계\] (?:규칙 검증 결과|Python 검증 결과)\s*(.*?)(?:\n## |\Z)", report, flags=re.S)
-        if v:
-            st.markdown(v.group(0))
+    # 메시지/검증
+    with st.expander("⚠️ 검증/메모"):
+        if messages:
+            for m in messages:
+                st.markdown(f"- {m}")
         else:
-            st.markdown("검증 섹션을 찾지 못했습니다.")
+            st.caption("표시할 메시지가 없습니다.")
 
     # 원문
-    with st.expander("📄 원문 리포트 보기"):
-        st.markdown(report)
+    with st.expander("📄 원문 리포트"):
+        if report_md:
+            st.markdown(report_md)
+        else:
+            st.caption("원문 리포트가 제공되지 않았습니다.")
 
-    return current_qty, target_qty, need_qty, moved_qty, achv
+
+def render_capa_chart(plan_df: pd.DataFrame):
+    """(기존 유지) CAPA 차트 — 기본은 접힘"""
+    if plan_df.empty or "qty_1차" not in plan_df.columns:
+        return
+
+    with st.expander("📊 CAPA 사용 현황 (열기)"):
+        daily_summary = plan_df.groupby(["plan_date", "line"])["qty_1차"].sum().reset_index()
+        daily_summary.columns = ["plan_date", "line", "current_qty"]
+        daily_summary["max_capa"] = daily_summary["line"].map(CAPA_LIMITS)
+        daily_summary["remaining_capa"] = daily_summary["max_capa"] - daily_summary["current_qty"]
+
+        chart_data = (
+            daily_summary.pivot(index="plan_date", columns="line", values="current_qty")
+            .fillna(0)
+            .sort_index()
+        )
+
+        fig = go.Figure()
+        colors = {"조립1": "#0066CC", "조립2": "#66B2FF", "조립3": "#FF6666"}
+
+        for line in ["조립1", "조립2", "조립3"]:
+            if line in chart_data.columns:
+                fig.add_trace(
+                    go.Bar(
+                        name=f"{line}",
+                        x=chart_data.index,
+                        y=chart_data[line],
+                        marker_color=colors.get(line),
+                        hovertemplate="%{x}<br>수량: %{y:,}개",
+                    )
+                )
+
+        for line, limit in CAPA_LIMITS.items():
+            fig.add_hline(
+                y=limit,
+                line_dash="dash",
+                line_color=colors.get(line, "#888"),
+                annotation_text=f"{line} 한계: {limit:,}",
+                annotation_position="right",
+            )
+
+        fig.update_layout(
+            barmode="group",
+            height=360,
+            xaxis_title="날짜",
+            yaxis_title="수량 (개)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="x unified",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("📋 상세 데이터 보기"):
+            st.dataframe(
+                daily_summary.style.format(
+                    {"current_qty": "{:,.0f}", "max_capa": "{:,.0f}", "remaining_capa": "{:,.0f}"}
+                ),
+                use_container_width=True,
+            )
 
 
-# ==================== 사이드바 안내 ====================
+# ==================== Sidebar ====================
 with st.sidebar:
     st.title("🏭 생산계획 통합")
     st.caption("조회: 일반 질문 / 조정: 날짜+라인+% 또는 샘플/추가/감축/증량")
@@ -317,29 +323,27 @@ with st.sidebar:
     st.markdown(
         """
 **예시(조정)**
-- `2026-01-23 조립1 공정감사로 1일CAPA의 70%만 생산`
+- `2026-01-23 조립1 공정감사로 1일 CAPA의 70%만 생산`
 - `2026-01-21 조립1 (T6) 샘플 350개 추가`
 
 **예시(조회)**
 - `내일 조립2에 T6 계획 있어?`
-        """
+"""
     )
 
 
-# ==================== 메인 화면 ====================
+# ==================== Main ====================
 st.title("🏭 생산계획 통합 시스템")
 st.caption("💡 조회는 일반 질문, 조정은 날짜+라인+% 또는 날짜+샘플/추가/감축/증량 등을 입력하세요")
 
-# 세션 상태 초기화
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 기존 메시지 표시
+# 과거 메시지 표시
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 사용자 입력
 prompt = st.chat_input("질문을 입력하세요")
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -347,18 +351,10 @@ if prompt:
         st.markdown(prompt)
 
     target_date = extract_date(prompt)
-
-    # 조정 모드 조건: 날짜 + (라인명 또는 % 또는 CAPA/감축/증량/샘플/추가/감사 등)
-    is_adjustment_mode = bool(target_date) and (
-        any(line in prompt for line in ["조립1", "조립2", "조립3"])
-        or re.search(r"\d+\s*%", prompt)
-        or "CAPA" in prompt.upper()
-        or any(k in prompt for k in ["줄여", "감축", "증량", "샘플", "추가", "생산", "공정감사", "감사"])
-    )
+    adj_mode = is_adjustment_mode(prompt, target_date)
 
     with st.chat_message("assistant"):
-        if is_adjustment_mode:
-            # ========== 조정 모드 (하이브리드) ==========
+        if adj_mode:
             if not supabase:
                 st.error("❌ Supabase 연결이 없어 조정 모드를 실행할 수 없습니다. (secrets 설정 확인)")
                 st.session_state.messages.append({"role": "assistant", "content": "❌ Supabase 미설정"})
@@ -366,114 +362,43 @@ if prompt:
                 st.error("❌ GEMINI_API_KEY가 없어 조정 모드를 실행할 수 없습니다. (secrets 설정 확인)")
                 st.session_state.messages.append({"role": "assistant", "content": "❌ GEMINI_API_KEY 미설정"})
             else:
-                with st.spinner("🔍 하이브리드 분석 진행 중... (요약 UI로 표시)"):
+                with st.spinner("🔍 하이브리드 분석 진행 중..."):
                     plan_df, hist_df, product_map, plt_map = fetch_data(target_date)
 
                     if plan_df.empty:
                         st.error("❌ 데이터를 불러올 수 없습니다. 날짜/DB 테이블/기간을 확인해주세요.")
                         st.session_state.messages.append({"role": "assistant", "content": "❌ 데이터 로드 실패"})
                     else:
-                        try:
-                            report, success, charts, status = ask_professional_scheduler(
-                                question=prompt,
-                                plan_df=plan_df,
-                                hist_df=hist_df,
-                                product_map=product_map,
-                                plt_map=plt_map,
-                                question_date=target_date,
-                                mode="hybrid",
-                                today=TODAY,
-                                capa_limits=CAPA_LIMITS,
-                                genai_key=GENAI_KEY,
-                            )
-
-                            # ✅ UI 용어/톤 정리 (엔진 무영향)
-                            report = sanitize_hybrid_words(report)
-                            status = sanitize_hybrid_words(status)
-
-                            current_qty, target_qty, need_qty, moved_qty, achv = render_hybrid_summary_ui(
-                                report=report,
-                                status=status,
-                            )
-
-                            # 대화 히스토리에는 요약만 저장 (원문은 UI expander)
-                            if all(v is not None for v in [current_qty, target_qty, need_qty, moved_qty, achv]):
-                                summary_for_chat = (
-                                    f"{status}\n\n"
-                                    f"- 현재: {current_qty:,} / 목표: {target_qty:,}\n"
-                                    f"- 필요: {need_qty:,} / 실제: {moved_qty:,}\n"
-                                    f"- 달성률: {achv:.1f}%"
-                                )
-                            else:
-                                summary_for_chat = f"{status}\n\n(요약 수치 파싱 실패 — 원문 리포트에서 확인)"
-                            st.session_state.messages.append({"role": "assistant", "content": summary_for_chat})
-
-                        except Exception as e:
-                            answer = f"❌ **오류 발생**\n\n```\n{str(e)}\n```"
-                            st.markdown(answer)
-                            st.exception(e)
-                            st.session_state.messages.append({"role": "assistant", "content": answer})
-
-                # ====== CAPA 차트: 기본은 접힘(오른쪽 패널 가독성) ======
-                if not plan_df.empty and "qty_1차" in plan_df.columns:
-                    with st.expander("📊 CAPA 사용 현황 (열기)"):
-                        daily_summary = plan_df.groupby(["plan_date", "line"])["qty_1차"].sum().reset_index()
-                        daily_summary.columns = ["plan_date", "line", "current_qty"]
-                        daily_summary["max_capa"] = daily_summary["line"].map(CAPA_LIMITS)
-                        daily_summary["remaining_capa"] = daily_summary["max_capa"] - daily_summary["current_qty"]
-
-                        chart_data = (
-                            daily_summary.pivot(index="plan_date", columns="line", values="current_qty")
-                            .fillna(0)
-                            .sort_index()
+                        # ✅ 여기서부터는 '구조화 결과'를 받아 그대로 표시
+                        result = ask_professional_scheduler(
+                            question=prompt,
+                            plan_df=plan_df,
+                            hist_df=hist_df,
+                            product_map=product_map,
+                            plt_map=plt_map,
+                            question_date=target_date,
+                            mode="hybrid",
+                            today=TODAY,
+                            capa_limits=CAPA_LIMITS,
+                            genai_key=GENAI_KEY,
                         )
 
-                        fig = go.Figure()
-                        colors = {"조립1": "#0066CC", "조립2": "#66B2FF", "조립3": "#FF6666"}
-
-                        for line in ["조립1", "조립2", "조립3"]:
-                            if line in chart_data.columns:
-                                fig.add_trace(
-                                    go.Bar(
-                                        name=f"{line}",
-                                        x=chart_data.index,
-                                        y=chart_data[line],
-                                        marker_color=colors.get(line, None),
-                                        hovertemplate="%{x}<br>수량: %{y:,}개",
-                                    )
-                                )
-
-                        for line, limit in CAPA_LIMITS.items():
-                            fig.add_hline(
-                                y=limit,
-                                line_dash="dash",
-                                line_color=colors.get(line, "#888"),
-                                annotation_text=f"{line} 한계: {limit:,}",
-                                annotation_position="right",
+                        # (안전) 혹시 기존 튜플 반환이면 친절하게 안내
+                        if not isinstance(result, dict):
+                            st.error(
+                                "❌ 현재 hybrid_merged.py가 dict를 반환하지 않고 있어요.\n\n"
+                                "3) app.py는 hybrid 결과를 구조화(dict)로 받는 전제입니다.\n"
+                                "먼저 hybrid_merged.py를 수정해서 dict를 반환하도록 바꿔야 해요."
                             )
+                        else:
+                            render_hybrid_view(result)
 
-                        fig.update_layout(
-                            barmode="group",
-                            height=360,
-                            xaxis_title="날짜",
-                            yaxis_title="수량 (개)",
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                            hovermode="x unified",
-                        )
-
-                        st.plotly_chart(fig, use_container_width=True)
-
-                        with st.expander("📋 상세 데이터 보기"):
-                            st.dataframe(
-                                daily_summary.style.format(
-                                    {"current_qty": "{:,.0f}", "max_capa": "{:,.0f}", "remaining_capa": "{:,.0f}"}
-                                ),
-                                use_container_width=True,
-                            )
+                    # (기존 유지) CAPA 차트
+                    if not plan_df.empty:
+                        render_capa_chart(plan_df)
 
         else:
-            # ========== 조회 모드 (레거시) ==========
-            # ✅ 이 블록은 legacy.py에 영향 없도록 기존 흐름 유지
+            # ✅ legacy.py는 기존 흐름 그대로
             if not supabase:
                 answer = "❌ Supabase 연결이 없어 조회 모드를 실행할 수 없습니다. (secrets 설정 확인)"
                 st.error(answer)
