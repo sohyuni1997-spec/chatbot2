@@ -850,18 +850,29 @@ def markdown_to_html(text: str) -> str:
     return "".join(result_html)
 
 
-def display_message(role: str, content: str):
+def display_message(role, content):
     """커스텀 메시지 표시 함수 - 사용자 및 AI 아바타 모두 이미지 사용"""
     if not content:
         return
-
+    
+    # 아바타 설정
     if role == "user":
-        avatar_html = f'<img src="data:image/png;base64,{user_avatar_base64}" alt="User Avatar">' if user_avatar_base64 else ""
+        # 사용자 아바타는 무조건 이미지 사용 (이모지 제거)
+        if user_avatar_base64:
+            avatar_html = f'<img src="data:image/png;base64,{user_avatar_base64}" alt="User Avatar">'
+        else:
+            # 이미지 로드 실패 시에도 빈 공간 유지 (이모지 없음)
+            avatar_html = ''
     else:
-        avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">' if ai_avatar_base64 else ""
-
+        # AI 아바타는 무조건 이미지 사용 (이모지 제거)
+        if ai_avatar_base64:
+            avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">'
+        else:
+            # 이미지 로드 실패 시에도 빈 공간 유지 (이모지 없음)
+            avatar_html = ''
+    
     html_content = markdown_to_html(content)
-
+    
     html_output = f"""
     <div class="message-row {role}">
         <div class="avatar {role}">{avatar_html}</div>
@@ -869,6 +880,7 @@ def display_message(role: str, content: str):
     </div>
     """
     st.markdown(html_output, unsafe_allow_html=True)
+
 
 
 def display_loading():
