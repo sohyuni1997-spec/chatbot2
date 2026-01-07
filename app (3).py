@@ -12,12 +12,11 @@ import os
 from legacy import fetch_db_data_legacy, query_gemini_ai_legacy
 from hybrid import ask_professional_scheduler
 
-
 # ==================== 환경 설정 ====================
 st.set_page_config(page_title="orcHatStra", page_icon="🎯", layout="wide")
 
 
-# 이미지 파일을 Base64로 인코딩하는 함수
+# ==================== 이미지(Base64) 로더 ====================
 def get_base64_of_bin_file(bin_file: str):
     """이미지 파일을 Base64로 인코딩"""
     possible_paths = [
@@ -25,7 +24,6 @@ def get_base64_of_bin_file(bin_file: str):
         os.path.join(os.path.dirname(__file__), bin_file) if "__file__" in globals() else bin_file,
         os.path.join(os.getcwd(), bin_file),
     ]
-
     for path in possible_paths:
         try:
             if os.path.exists(path):
@@ -34,20 +32,19 @@ def get_base64_of_bin_file(bin_file: str):
                 return base64.b64encode(data).decode()
         except Exception:
             continue
-
     return None
 
 
-# 로고, AI 아바타, 사용자 아바타 이미지 로드
+# 로고, AI 아바타, 사용자 아바타 이미지 로드 (레포에 파일 없으면 None)
 logo_base64 = get_base64_of_bin_file("HSE.svg")
 ai_avatar_base64 = get_base64_of_bin_file("ai 아바타.png")
 user_avatar_base64 = get_base64_of_bin_file("이력서 사진.v카툰.png")
 
 
+# ==================== CSS ====================
 st.markdown(
     f"""
 <style>
-    /* ==================== 다크모드/라이트모드 변수 설정 ==================== */
     :root {{
         --bg-primary: #F5F5F7;
         --bg-secondary: #FFFFFF;
@@ -84,7 +81,6 @@ st.markdown(
         }}
     }}
 
-    /* ==================== 전체 배경 ==================== */
     .stApp {{
         background-color: var(--bg-primary);
     }}
@@ -94,12 +90,10 @@ st.markdown(
         padding-top: 100px !important;
     }}
 
-    /* Streamlit 기본 헤더 숨기기 */
     [data-testid="stHeader"] {{
         display: none;
     }}
 
-    /* ==================== 고정 헤더 배너 ==================== */
     .fixed-header {{
         position: fixed;
         top: 0;
@@ -141,19 +135,16 @@ st.markdown(
         margin: 0;
     }}
 
-    /* ==================== Streamlit 기본 채팅 UI 숨기기 ==================== */
     [data-testid="stChatMessage"] {{
         display: none !important;
     }}
 
-    /* ==================== 커스텀 채팅 컨테이너 ==================== */
     .chat-container {{
         max-width: 900px;
         margin: 0 auto;
         padding: 20px;
     }}
 
-    /* ==================== 메시지 행 ==================== */
     .message-row {{
         display: flex;
         margin-bottom: 16px;
@@ -166,19 +157,16 @@ st.markdown(
         to {{ opacity: 1; transform: translateY(0); }}
     }}
 
-    /* 사용자 메시지 - 오른쪽 */
     .message-row.user {{
         flex-direction: row-reverse;
         justify-content: flex-start;
     }}
 
-    /* AI 메시지 - 왼쪽 */
     .message-row.assistant {{
         flex-direction: row;
         justify-content: flex-start;
     }}
 
-    /* ==================== 아바타 스타일 ==================== */
     .avatar {{
         width: 40px;
         height: 40px;
@@ -194,7 +182,6 @@ st.markdown(
         overflow: hidden;
     }}
 
-    /* 사용자 아바타 - 이미지 전용 */
     .avatar.user {{
         background: transparent;
         margin-left: 12px;
@@ -210,7 +197,6 @@ st.markdown(
         display: block;
     }}
 
-    /* AI 아바타 - 이미지 전용 */
     .avatar.assistant {{
         background: transparent;
         margin-right: 12px;
@@ -226,7 +212,6 @@ st.markdown(
         display: block;
     }}
 
-    /* ==================== 메시지 말풍선 ==================== */
     .message-bubble {{
         max-width: 70%;
         padding: 12px 18px;
@@ -252,7 +237,6 @@ st.markdown(
         border: 1px solid var(--border-color);
     }}
 
-    /* ==================== 로딩 애니메이션 ==================== */
     .loading-bubble {{
         max-width: 70%;
         padding: 16px 18px;
@@ -283,7 +267,6 @@ st.markdown(
         30% {{ opacity: 1; transform: scale(1.1); }}
     }}
 
-    /* ==================== 마크다운 스타일링 ==================== */
     .message-bubble h1,
     .message-bubble h2,
     .message-bubble h3 {{
@@ -404,7 +387,6 @@ st.markdown(
         background-color: rgba(255, 255, 255, 0.05);
     }}
 
-    /* ==================== 채팅 입력창 ==================== */
     .stChatInputContainer {{
         background-color: var(--bg-primary) !important;
         border-top: 1px solid var(--border-color) !important;
@@ -435,12 +417,10 @@ st.markdown(
         color: #8E8E93 !important;
     }}
 
-    /* ==================== 스피너 숨기기 ==================== */
     .stSpinner {{
         display: none !important;
     }}
 
-    /* ==================== 차트 컨테이너 ==================== */
     .js-plotly-plot {{
         border-radius: 20px !important;
         overflow: hidden !important;
@@ -450,7 +430,6 @@ st.markdown(
         margin-top: 20px !important;
     }}
 
-    /* ==================== Expander ==================== */
     .streamlit-expanderHeader {{
         background-color: var(--bg-secondary) !important;
         border-radius: 16px !important;
@@ -461,7 +440,6 @@ st.markdown(
         box-shadow: 0 2px 6px var(--shadow-light) !important;
     }}
 
-    /* ==================== 데이터프레임 ==================== */
     [data-testid="stDataFrame"] {{
         background-color: var(--bg-secondary);
         border-radius: 12px;
@@ -517,15 +495,13 @@ def init_supabase():
 supabase: Client = init_supabase()
 genai.configure(api_key=GENAI_KEY)
 
-
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
 FROZEN_DAYS = 3
 TEST_MODE = True
 TODAY = datetime(2026, 1, 5).date() if TEST_MODE else datetime.now().date()
 
 
-# ==================== (UI) report 분리 + 날짜별 변경량(Δ) ====================
-
+# ==================== report 분리 ====================
 def split_report_sections(report_md: str) -> dict:
     """hybrid 보고서는 보통 '## ' 섹션 헤더를 사용하므로 그 기준으로 분리"""
     if not report_md:
@@ -540,13 +516,13 @@ def split_report_sections(report_md: str) -> dict:
     return sections
 
 
-def render_datewise_delta_tables(validated_moves: list[dict] | None):
-    """검증된 이동 내역(validated_moves)로 날짜별 변경량(Δ) 표를 세로로 나열"""
+# ==================== (A) 말풍선 안 Δ / 상세(접기) 생성 ====================
+def build_delta_markdown(validated_moves: list[dict] | None) -> str:
+    """Δ를 말풍선 안에 넣기 위한 '텍스트 표' 생성"""
     if not validated_moves:
-        st.caption("📊 변경량 표: 이동 내역이 없습니다.")
-        return
+        return "📊 생산계획 변경량 요약(Δ)\n\n(이동 내역 없음)"
 
-    records: list[dict] = []
+    records = []
     for mv in validated_moves:
         item = str(mv.get("item", "")).strip()
         qty = int(mv.get("qty", 0) or 0)
@@ -558,144 +534,44 @@ def render_datewise_delta_tables(validated_moves: list[dict] | None):
 
         from_date, from_line = [x.strip() for x in from_loc.split("_", 1)]
         to_date, to_line = [x.strip() for x in to_loc.split("_", 1)]
+        records.append((from_date, item, from_line, -qty))
+        records.append((to_date, item, to_line, +qty))
 
-        records.append({"date": from_date, "item": item, "line": from_line, "delta": -qty})
-        records.append({"date": to_date, "item": item, "line": to_line, "delta": +qty})
+    if not records:
+        return "📊 생산계획 변경량 요약(Δ)\n\n(표시할 데이터 없음)"
 
-    df = pd.DataFrame(records)
-    if df.empty:
-        st.caption("📊 변경량 표: 표시할 데이터가 없습니다.")
-        return
-
-    def _fmt_delta(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)) or x == 0:
-            return ""
-        try:
-            n = int(x)
-        except Exception:
-            return str(x)
-        return f"{n:+,}"
+    df = pd.DataFrame(records, columns=["date", "item", "line", "delta"])
+    out = ["📊 생산계획 변경량 요약(Δ)"]
 
     for date in sorted(df["date"].unique()):
-        day = df[df["date"] == date].copy()
-        pivot_num = (
+        day = df[df["date"] == date]
+        pivot = (
             day.pivot_table(index="item", columns="line", values="delta", aggfunc="sum", fill_value=0)
             .reindex(columns=["조립1", "조립2", "조립3"])
             .fillna(0)
         )
-        pivot_disp = pivot_num.applymap(_fmt_delta)
-        pivot_disp = pivot_disp.loc[~(pivot_disp == "").all(axis=1)]
 
-        st.markdown(f"#### 📅 {date} 기준 변경분")
-        if pivot_disp.empty:
-            st.caption("(변경 없음)")
-        else:
-            st.dataframe(pivot_disp, use_container_width=True)
+        pivot = pivot.loc[~(pivot == 0).all(axis=1)]
+        out.append(f"\n### 📅 {date}")
+        if pivot.empty:
+            out.append("(변경 없음)")
+            continue
 
+        out.append("| 품목 | 조립1 | 조립2 | 조립3 |")
+        out.append("|---|---:|---:|---:|")
 
-def render_hybrid_details(report_md: str):
-    """검증/CAPA/원문 같은 상세 정보는 '탭 1개'로 접어서 제공"""
-    sections = split_report_sections(report_md)
-    with st.expander("🔎 상세 보기", expanded=False):
-        (detail_tab,) = st.tabs(["🔎 상세"])
-        with detail_tab:
-            st.markdown("### ✅ 검증 결과")
-            verify_key = next(
-                (k for k in sections.keys() if "Python 검증" in k or "검증 결과" in k or "검증" in k),
-                None,
-            )
-            st.markdown(sections.get(verify_key, "검증 섹션이 없습니다."))
+        for item, row in pivot.iterrows():
+            def fmt(x):
+                x = int(x)
+                return "" if x == 0 else f"{x:+,}"
 
-            st.markdown("---")
+            out.append(f"| {item} | {fmt(row.get('조립1', 0))} | {fmt(row.get('조립2', 0))} | {fmt(row.get('조립3', 0))} |")
 
-            st.markdown("### 📊 CAPA 현황")
-            capa_key = next((k for k in sections.keys() if "CAPA 현황" in k), None)
-            st.markdown(sections.get(capa_key, "CAPA 섹션이 없습니다."))
-
-            st.markdown("---")
-
-            st.markdown("### 📄 전체 원문")
-            st.markdown(sections.get("__FULL__", report_md))
-
-
-def render_hybrid_result_ui(status: str, success: bool, report_md: str, validated_moves: list | None = None):
-    """커스텀 채팅 UI 아래(일반 Streamlit 영역)에 '조치계획/Δ/상세'를 제공"""
-    if success:
-        st.success(status)
-    else:
-        st.warning(status)
-
-    sections = split_report_sections(report_md)
-
-    st.markdown("#### 🧾 조치계획(이동 내역)")
-    action_key = next((k for k in sections.keys() if "최종 조치 계획" in k), None)
-    action_body = sections.get(action_key, "").strip()
-
-    if action_body:
-        st.markdown(action_body)
-        st.markdown("---")
-        st.markdown("### 📊 생산계획 변경량 요약(Δ)")
-        render_datewise_delta_tables(validated_moves)
-    else:
-        st.info("조치계획이 없습니다. (상세 보기에서 원문 확인 가능)")
-
-    render_hybrid_details(report_md)
-
-
-# ==================== 데이터 로드 ====================
-@st.cache_data(ttl=600)
-def fetch_data(target_date=None):
-    try:
-        if target_date:
-            dt = datetime.strptime(target_date, "%Y-%m-%d")
-            start_date = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
-            end_date = (dt + timedelta(days=10)).strftime("%Y-%m-%d")
-            plan_res = (
-                supabase.table("production_plan_2026_01")
-                .select("*")
-                .gte("plan_date", start_date)
-                .lte("plan_date", end_date)
-                .execute()
-            )
-        else:
-            plan_res = supabase.table("production_plan_2026_01").select("*").execute()
-
-        plan_df = pd.DataFrame(plan_res.data) if plan_res.data else pd.DataFrame()
-        hist_res = supabase.table("production_investigation").select("*").execute()
-        hist_df = pd.DataFrame(hist_res.data) if hist_res.data else pd.DataFrame()
-
-        if not plan_df.empty:
-            plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
-            plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
-            product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
-            for k in product_map:
-                if "T6" in k.upper():
-                    product_map[k] = ["조립1", "조립2", "조립3"]
-            return plan_df, hist_df, product_map, plt_map
-
-        return pd.DataFrame(), pd.DataFrame(), {}, {}
-    except Exception as e:
-        st.error(f"데이터 로드 실패: {e}")
-        return pd.DataFrame(), pd.DataFrame(), {}, {}
-
-
-def extract_date(text):
-    """질문에서 날짜 추출"""
-    if not text:
-        return None
-    patterns = [r"(\d{1,2})/(\d{1,2})", r"(\d{1,2})월\s*(\d{1,2})일", r"202[56]-(\d{1,2})-(\d{1,2})"]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            m, d = match.groups()
-            return f"2026-{int(m):02d}-{int(d):02d}"
-    return None
+    return "\n".join(out)
 
 
 # ==================== 커스텀 마크다운(HTML) 렌더링 ====================
-
 def clean_content(text: str) -> str:
-    """불필요한 연속 공백 제거하되 마크다운 구조는 유지"""
     if not text:
         return ""
     text = re.sub(r"\n\n\n+", "\n\n", text)
@@ -705,7 +581,6 @@ def clean_content(text: str) -> str:
 
 
 def detect_table(text: str):
-    """텍스트에서 표 형식을 감지하고 HTML 테이블로 변환"""
     if not text:
         return [("text", "")]
 
@@ -735,7 +610,6 @@ def detect_table(text: str):
 
 
 def parse_table_to_html(table_lines):
-    """파이프로 구분된 표를 HTML 테이블로 변환 - 구분선 제거 개선"""
     if not table_lines:
         return ""
 
@@ -746,7 +620,6 @@ def parse_table_to_html(table_lines):
     for line in table_lines:
         stripped = line.strip()
 
-        # 헤더 구분선(| --- | --- |, |:---:| 등) 제거
         if re.match(r"^\|[\s\-:]+\|[\s\-:|\s]*$", stripped):
             continue
 
@@ -755,7 +628,6 @@ def parse_table_to_html(table_lines):
 
         cells = [cell.strip() for cell in stripped.split("|")]
         cells = [c for c in cells if c]
-
         if not cells:
             continue
 
@@ -780,7 +652,6 @@ def parse_table_to_html(table_lines):
 
 
 def markdown_to_html(text: str) -> str:
-    """마크다운을 HTML로 변환"""
     import html
 
     if not text:
@@ -850,8 +721,34 @@ def markdown_to_html(text: str) -> str:
     return "".join(result_html)
 
 
+def build_details_html(report_md: str) -> str:
+    """검증/CAPA/원문을 말풍선 안에 '접기'로 넣기"""
+    sections = split_report_sections(report_md)
+
+    verify_key = next((k for k in sections.keys() if "Python 검증" in k or "검증 결과" in k or "검증" in k), None)
+    capa_key = next((k for k in sections.keys() if "CAPA 현황" in k), None)
+
+    verify = sections.get(verify_key, "검증 섹션이 없습니다.")
+    capa = sections.get(capa_key, "CAPA 섹션이 없습니다.")
+    full = sections.get("__FULL__", report_md)
+
+    return f"""
+<details>
+  <summary><b>🔎 상세(검증/CAPA/원문)</b></summary>
+  <br>
+  <b>✅ 검증 결과</b><br><br>
+  {markdown_to_html(verify)}
+  <br><br>
+  <b>📊 CAPA 현황</b><br><br>
+  {markdown_to_html(capa)}
+  <br><br>
+  <b>📄 전체 원문</b><br><br>
+  {markdown_to_html(full)}
+</details>
+"""
+
+
 def display_message(role: str, content: str):
-    """커스텀 메시지 표시 함수 - 사용자 및 AI 아바타 모두 이미지 사용"""
     if not content:
         return
 
@@ -861,7 +758,6 @@ def display_message(role: str, content: str):
         avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">' if ai_avatar_base64 else ""
 
     html_content = markdown_to_html(content)
-
     html_output = f"""
     <div class="message-row {role}">
         <div class="avatar {role}">{avatar_html}</div>
@@ -872,7 +768,6 @@ def display_message(role: str, content: str):
 
 
 def display_loading():
-    """AI 답변 대기 중 로딩 애니메이션 표시"""
     avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">' if ai_avatar_base64 else ""
     html_output = f"""
     <div class="message-row assistant">
@@ -887,38 +782,85 @@ def display_loading():
     st.markdown(html_output, unsafe_allow_html=True)
 
 
-# ==================== 메인 화면 (커스텀 채팅) ====================
+# ==================== 데이터 로드 ====================
+@st.cache_data(ttl=600)
+def fetch_data(target_date=None):
+    try:
+        if target_date:
+            dt = datetime.strptime(target_date, "%Y-%m-%d")
+            start_date = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
+            end_date = (dt + timedelta(days=10)).strftime("%Y-%m-%d")
+            plan_res = (
+                supabase.table("production_plan_2026_01")
+                .select("*")
+                .gte("plan_date", start_date)
+                .lte("plan_date", end_date)
+                .execute()
+            )
+        else:
+            plan_res = supabase.table("production_plan_2026_01").select("*").execute()
 
-# 세션 상태 초기화
+        plan_df = pd.DataFrame(plan_res.data) if plan_res.data else pd.DataFrame()
+        hist_res = supabase.table("production_investigation").select("*").execute()
+        hist_df = pd.DataFrame(hist_res.data) if hist_res.data else pd.DataFrame()
+
+        if not plan_df.empty:
+            plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
+            plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
+            product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
+            for k in product_map:
+                if "T6" in k.upper():
+                    product_map[k] = ["조립1", "조립2", "조립3"]
+            return plan_df, hist_df, product_map, plt_map
+
+        return pd.DataFrame(), pd.DataFrame(), {}, {}
+    except Exception as e:
+        st.error(f"데이터 로드 실패: {e}")
+        return pd.DataFrame(), pd.DataFrame(), {}, {}
+
+
+def extract_date(text):
+    if not text:
+        return None
+    patterns = [r"(\d{1,2})/(\d{1,2})", r"(\d{1,2})월\s*(\d{1,2})일", r"202[56]-(\d{1,2})-(\d{1,2})"]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            m, d = match.groups()
+            return f"2026-{int(m):02d}-{int(d):02d}"
+    return None
+
+
+# ==================== 메인 화면 (커스텀 채팅) ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "is_loading" not in st.session_state:
     st.session_state.is_loading = False
 
-# 마지막 하이브리드 결과(상세 UI/차트 출력용)
+# 마지막 하이브리드 결과(차트/상세 출력용)
 if "last_hybrid" not in st.session_state:
     st.session_state.last_hybrid = None
 
-# 채팅 컨테이너 시작
+
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
-# 기존 메시지 표시
 for msg in st.session_state.messages:
     if isinstance(msg, dict) and "role" in msg and "content" in msg:
         display_message(msg["role"], msg["content"])
 
-# 로딩 중일 때 로딩 애니메이션 표시
 if st.session_state.is_loading:
     display_loading()
 
 st.markdown("</div>", unsafe_allow_html=True)
+
 
 # 사용자 입력
 if prompt := st.chat_input("무엇을 도와드릴까요?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.is_loading = True
     st.rerun()
+
 
 # 로딩 상태일 때만 AI 응답 생성
 if st.session_state.is_loading:
@@ -963,13 +905,12 @@ if st.session_state.is_loading:
                     status = ""
                     validated_moves = None
 
-                    if isinstance(result, tuple) or isinstance(result, list):
+                    if isinstance(result, (tuple, list)):
                         if len(result) == 5:
                             report, success, charts, status, validated_moves = result
                         elif len(result) == 4:
                             report, success, charts, status = result
                         else:
-                            # 예외 케이스: 최소 4개는 기대
                             report = str(result)
                             success = False
                             status = "생산계획 조정 결과를 파싱하지 못했습니다."
@@ -984,10 +925,12 @@ if st.session_state.is_loading:
                     action_key = next((k for k in sections.keys() if "최종 조치 계획" in k), None)
                     action_body = sections.get(action_key, "").strip()
 
+                    # ✅ 말풍선 안에: 조치계획 + Δ + 상세(접기)
                     answer = f"{'✅' if success else '⚠️'} {status}\n\n"
                     answer += "🧾 조치계획(이동 내역)\n"
                     answer += (action_body if action_body else "(조치계획 없음)")
-                    answer += "\n\n(아래에서 Δ/검증/CAPA/원문 확인 가능)"
+                    answer += "\n\n" + build_delta_markdown(validated_moves)
+                    answer += "\n\n" + build_details_html(report)
 
                     st.session_state.last_hybrid = {
                         "target_date": target_date,
@@ -1018,21 +961,11 @@ if st.session_state.is_loading:
             st.rerun()
 
 
-# ==================== 하이브리드 상세 UI + CAPA 차트 ====================
-# (커스텀 채팅 아래에 Streamlit 기본 컴포넌트로 출력)
+# ==================== CAPA 차트 (기존 기능 유지) ====================
 if not st.session_state.is_loading and st.session_state.last_hybrid:
     last = st.session_state.last_hybrid
-
-    st.markdown("---")
-    render_hybrid_result_ui(
-        status=last.get("status", ""),
-        success=bool(last.get("success", False)),
-        report_md=last.get("report_md", ""),
-        validated_moves=last.get("validated_moves"),
-    )
-
-    # CAPA 차트 표시 (기존 기능 유지)
     plan_df = last.get("plan_df")
+
     if isinstance(plan_df, pd.DataFrame) and not plan_df.empty and "qty_1차" in plan_df.columns:
         st.subheader("📊 CAPA 사용 현황")
 
@@ -1044,8 +977,6 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
         chart_data = daily_summary.pivot(index="plan_date", columns="line", values="current_qty").fillna(0)
 
         fig = go.Figure()
-
-        # (원본 app(5) 스타일 유지) + line별 색상 정의
         colors = {"조립1": "#007AFF", "조립2": "#34C759", "조립3": "#FF3B30"}
 
         for line in ["조립1", "조립2", "조립3"]:
@@ -1079,7 +1010,11 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
             hovermode="x unified",
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="SF Pro Display, -apple-system, BlinkMacSystemFont, sans-serif", size=13, color="#000000"),
+            font=dict(
+                family="SF Pro Display, -apple-system, BlinkMacSystemFont, sans-serif",
+                size=13,
+                color="#000000",
+            ),
             margin=dict(l=20, r=20, t=40, b=20),
         )
 
