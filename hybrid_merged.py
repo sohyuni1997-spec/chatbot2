@@ -125,7 +125,7 @@ def _infer_target_line(question: str, plan_df: pd.DataFrame, question_date: str)
 
 
 # ========================================================================
-# 1~3단계: 데이터 분석
+# 1~3단계: 데이터 수사
 # ========================================================================
 
 def step1_list_current_stock(plan_df: pd.DataFrame, target_date: str, target_line: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -351,7 +351,7 @@ def build_ai_fact_report(
     op_kr = "감축" if operation_mode == "reduce" else "증량"
 
     fact = []
-    fact.append("### 📊 Python 분석 완료 (검증된 팩트)")
+    fact.append("### 📊 Python 수사 완료 (검증된 팩트)")
     fact.append(f"- 대상: {target_date} {target_line}")
     fact.append(f"- 목표: {op_kr} {operation_qty:,}개")
     fact.append("")
@@ -907,9 +907,9 @@ def generate_full_report(
     final_qty = current_qty - moved_total if operation_mode == "reduce" else current_qty + moved_total
 
     report = []
-    report.append(f"# 📊 {question_date} {target_line} 하이브리드 분석 보고서")
+    report.append(f"# 📊 {question_date} {target_line} 하이브리드 수사 보고서")
     report.append("")
-    report.append("## 🔍 분석 방식")
+    report.append("## 🔍 수사 방식")
     report.append(f"- 전략 수립: {strategy_source}")
     report.append(f"- 분석 기준일: {today_str}")
     report.append("")
@@ -1007,9 +1007,9 @@ def ask_professional_scheduler(
     today=None,
     capa_limits: Optional[Dict[str, int]] = None,
     genai_key: str = "",
-) -> Tuple[str, bool, List[Any], str]:
+) -> Tuple[str, bool, List[Any], str, List[Dict[str, Any]]]:
     """
-    Returns: (report, success, charts, status_message)
+    Returns: (report, success, charts, status, validated_moves)_message)
     """
     if today is None:
         today = datetime(2026, 1, 5).date()
@@ -1027,17 +1027,18 @@ def ask_professional_scheduler(
             False,
             [],
             "[ERROR] 라인 미지정",
+            [],
         )
 
     # 1) stock
     stock_res, err = step1_list_current_stock(plan_df, question_date, target_line)
     if err:
-        return f"❌ [1단계 실패] {err}", False, [], "[ERROR] 품목 조회 실패"
+        return f"❌ [1단계 실패] {err}", False, [], "[ERROR] 품목 조회 실패", []
 
     # 2) slack
     items_with_slack = step2_calculate_cumulative_slack(plan_df, stock_res)
     if not items_with_slack:
-        return "❌ [2단계 실패] 이동 가능한 품목이 없습니다.", False, [], "[ERROR] 품목 분석 실패"
+        return "❌ [2단계 실패] 이동 가능한 품목이 없습니다.", False, [], "[ERROR] 품목 분석 실패", []
 
     # 3) capa
     capa_status = step3_analyze_destination_capacity(plan_df, question_date, target_line, capa_limits)
@@ -1045,7 +1046,7 @@ def ask_professional_scheduler(
     # 4) constraint
     constraint_info = step4_prepare_constraint_info(items_with_slack, target_line)
     if not constraint_info:
-        return "❌ [4단계 실패] 이동 가능한 품목(1PLT 이상)이 없습니다.", False, [], "[ERROR] 제약정보 없음"
+        return "❌ [4단계 실패] 이동 가능한 품목(1PLT 이상)이 없습니다.", False, [], "[ERROR] 제약정보 없음", []
 
     # 5) 목표치 파싱: % or 샘플/추가 N
     capa_match = re.search(r"(\d+)\s*%", question)
@@ -1069,7 +1070,7 @@ def ask_professional_scheduler(
         diff = target_qty - current_total
 
     if diff == 0:
-        return "✅ 이미 목표 생산량과 동일합니다. 조치 불필요.", True, [], "[OK] 조치 불필요"
+        return "✅ 이미 목표 생산량과 동일합니다. 조치 불필요.", True, [], "[OK] 조치 불필요", []
 
     operation_mode = "increase" if diff > 0 else "reduce"
     operation_qty = abs(diff)
@@ -1157,7 +1158,7 @@ def ask_professional_scheduler(
     achievement = (moved_total / operation_qty * 100) if operation_qty else 0
 
     if achievement >= 90:
-        status = "[OK] 하이브리드 분석 완료 (목표 90% 이상)"
+        status = "[OK] 하이브리드 수사 완료 (목표 90% 이상)"
         success = True
     else:
         status = f"[WARN] 조치 완료(미달) - 달성률 {achievement:.1f}%"
@@ -1185,4 +1186,4 @@ def ask_professional_scheduler(
         extra_notes=extra_notes,
     )
 
-    return report, success, [], status
+    return report, success, [], status, final_moves
