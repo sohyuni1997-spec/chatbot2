@@ -16,6 +16,12 @@ from hybrid import ask_professional_scheduler
 # ==================== 환경 설정 ====================
 st.set_page_config(page_title="orcHatStra", page_icon="🎯", layout="wide")
 
+import os
+st.write("cwd:", os.getcwd())
+st.write("repo files:", sorted(os.listdir(os.getcwd()))[:50])
+st.write("logo loaded:", bool(logo_base64))
+st.write("ai avatar loaded:", bool(ai_avatar_base64))
+st.write("user avatar loaded:", bool(user_avatar_base64))
 
 # 이미지 파일을 Base64로 인코딩하는 함수
 def get_base64_of_bin_file(bin_file: str):
