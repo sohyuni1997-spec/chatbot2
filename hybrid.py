@@ -972,7 +972,7 @@ def generate_full_report(
                 oq = m.get("original_qty", 0) or 0
                 adj = f" ⚠️(조정: {oq:,}→{m['qty']:,})"
             report.append(
-                f"{i}) {m['item']} | {m['qty']:,}개({m.get('plt','?')}PLT){adj} | "
+                f"{i}) {m['item']} | {m['qty']:+,}개({m.get('plt','?')}PLT){adj} | "
                 f"{m.get('from','-')} → {m.get('to','-')} | {m.get('reason','-')}"
             )
     else:
@@ -1187,4 +1187,5 @@ def ask_professional_scheduler(
     )
 
     return report, success, [], status, final_moves
+
 
