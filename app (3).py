@@ -38,7 +38,7 @@ ai_avatar_base64 = get_base64_of_bin_file("ai 아바타.png")
 user_avatar_base64 = get_base64_of_bin_file("이력서 사진.v카툰.png")
 
 
-# ==================== CSS (기존 유지) ====================
+# ==================== CSS (기존 유지 + ✅ hybrid bubble table CSS 추가) ====================
 st.markdown(
     f"""
 <style>
@@ -281,6 +281,37 @@ st.markdown(
         padding: 12px 16px !important;
         box-shadow: 0 2px 6px var(--shadow-light) !important;
     }}
+
+    /* ✅✅ hybrid 말풍선 내부 HTML table 깨짐 방지 */
+    .message-bubble.assistant table {{
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        margin: 8px 0;
+        font-size: 14px;
+        overflow: hidden;
+        border-radius: 12px;
+    }}
+
+    .message-bubble.assistant th,
+    .message-bubble.assistant td {{
+        border: 1px solid var(--border-color);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+    }}
+
+    .message-bubble.assistant th {{
+        background: rgba(0,0,0,0.03);
+        font-weight: 600;
+    }}
+
+    /* item 컬럼(첫 컬럼)은 줄바꿈 허용 */
+    .message-bubble.assistant td:first-child,
+    .message-bubble.assistant th:first-child {{
+        white-space: normal;
+    }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -326,7 +357,6 @@ def init_supabase():
 
 supabase: Client = init_supabase()
 genai.configure(api_key=GENAI_KEY)
-
 
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
 TEST_MODE = True
@@ -549,6 +579,24 @@ def display_message(role, content):
     st.markdown(html_output, unsafe_allow_html=True)
 
 
+# ✅✅ hybrid 전용: "HTML을 그대로" 말풍선에 넣는 함수 (legacy 영향 없음)
+def display_message_html(role: str, html_inner: str):
+    if not html_inner:
+        return
+    if role == "user":
+        avatar_html = f'<img src="data:image/png;base64,{user_avatar_base64}" alt="User Avatar">' if user_avatar_base64 else ""
+    else:
+        avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">' if ai_avatar_base64 else ""
+
+    html_output = f"""
+    <div class="message-row {role}">
+        <div class="avatar {role}">{avatar_html}</div>
+        <div class="message-bubble {role}">{html_inner}</div>
+    </div>
+    """
+    st.markdown(html_output, unsafe_allow_html=True)
+
+
 def display_loading():
     avatar_html = f'<img src="data:image/png;base64,{ai_avatar_base64}" alt="AI Avatar">' if ai_avatar_base64 else ""
     html_output = f"""
@@ -601,11 +649,10 @@ def build_action_md(report_md: str) -> str:
     return "## 🧾 최종 조치 계획\n" + action_body
 
 
-def render_datewise_delta_tables(validated_moves: list[dict] | None):
-    """✅ hybrid Δ는 무조건 dataframe으로만 표시"""
+# ✅✅ hybrid Δ: 말풍선 내부용 HTML 테이블 생성
+def build_delta_html(validated_moves: list | None) -> str:
     if not validated_moves:
-        st.caption("📊 변경량 표: 이동 내역이 없습니다.")
-        return
+        return "<h3>📊 생산계획 변경량 요약(Δ)</h3><p>이동 내역이 없습니다.</p>"
 
     records = []
     for mv in validated_moves:
@@ -625,8 +672,7 @@ def render_datewise_delta_tables(validated_moves: list[dict] | None):
 
     df = pd.DataFrame(records)
     if df.empty:
-        st.caption("📊 변경량 표: 표시할 데이터가 없습니다.")
-        return
+        return "<h3>📊 생산계획 변경량 요약(Δ)</h3><p>표시할 데이터가 없습니다.</p>"
 
     def _fmt_delta(x):
         if x is None or (isinstance(x, float) and pd.isna(x)) or x == 0:
@@ -636,6 +682,8 @@ def render_datewise_delta_tables(validated_moves: list[dict] | None):
         except Exception:
             return str(x)
         return f"{n:+,}"
+
+    html_parts = ['<h3>📊 생산계획 변경량 요약(Δ)</h3>']
 
     for date in sorted(df["date"].unique()):
         day = df[df["date"] == date].copy()
@@ -647,11 +695,21 @@ def render_datewise_delta_tables(validated_moves: list[dict] | None):
         pivot_disp = pivot_num.applymap(_fmt_delta)
         pivot_disp = pivot_disp.loc[~(pivot_disp == "").all(axis=1)]
 
-        st.markdown(f"#### 📅 {date} 기준 변경분")
+        html_parts.append(f"<h4>📅 {date} 기준 변경분</h4>")
+
         if pivot_disp.empty:
-            st.caption("(변경 없음)")
-        else:
-            st.dataframe(pivot_disp, use_container_width=True)
+            html_parts.append("<p>(변경 없음)</p>")
+            continue
+
+        # index(item)를 첫 컬럼으로 넣고, border=0으로 기본 테두리 최소화(우리는 CSS로 제어)
+        tmp = pivot_disp.copy()
+        tmp.insert(0, "item", tmp.index)
+        tmp = tmp.reset_index(drop=True)
+
+        table_html = tmp.to_html(index=False, escape=False, border=0)
+        html_parts.append(table_html)
+
+    return "".join(html_parts)
 
 
 def render_hybrid_details_tabs(report_md: str, plan_df: pd.DataFrame | None = None):
@@ -712,7 +770,7 @@ def render_hybrid_details_tabs(report_md: str, plan_df: pd.DataFrame | None = No
 if "messages" not in st.session_state:
     # 메시지 구조:
     # {role, engine, content}  (공통)
-    # hybrid는 추가로 {action_md, validated_moves, report_md, plan_df(optional minimal)} 등 보유 가능
+    # hybrid는 추가로 {action_md, delta_html, validated_moves, report_md, plan_df(optional minimal)} 등 보유 가능
     st.session_state.messages = []
 if "is_loading" not in st.session_state:
     st.session_state.is_loading = False
@@ -740,18 +798,17 @@ for msg in st.session_state.messages:
         # ✅ legacy는 기존 로직 그대로 (표 포함 마크다운 → HTML 변환)
         display_message("assistant", content)
     else:
-        # ✅ hybrid는: (1) 조치계획 버블 (2) Δ dataframe (3) 상세탭
+        # ✅ hybrid는: (1) 조치계획 버블 (2) Δ HTML 테이블 버블 (3) 상세탭
         action_md = msg.get("action_md", "")
-        validated_moves = msg.get("validated_moves", None)
+        delta_html = msg.get("delta_html", "")
         report_md = msg.get("report_md", "")
         plan_df = msg.get("plan_df", None)
 
-        # (1) 조치계획은 말풍선에 마크다운 텍스트로
+        # (1) 조치계획 (기존대로 markdown_to_html 경유)
         display_message("assistant", action_md or "## 🧾 최종 조치 계획\n(조치계획 없음)")
 
-        # (2) Δ는 dataframe으로 (채팅 컨테이너 안에 그대로 렌더)
-        st.markdown("### 📊 생산계획 변경량 요약(Δ)")
-        render_datewise_delta_tables(validated_moves)
+        # (2) Δ는 "HTML 그대로" 말풍선 내부 렌더
+        display_message_html("assistant", delta_html or "<h3>📊 생산계획 변경량 요약(Δ)</h3><p>(변경 없음)</p>")
 
         # (3) 나머지는 탭/expander
         if report_md:
@@ -789,9 +846,16 @@ if st.session_state.is_loading:
             plan_df, hist_df, product_map, plt_map = fetch_data(target_date)
 
             if plan_df.empty:
-                # hybrid인데 데이터 없음 → 간단 에러도 hybrid로 저장해도 되고 legacy로 저장해도 됨
                 st.session_state.messages.append(
-                    {"role": "assistant", "engine": "hybrid", "content": "", "action_md": "## 🧾 최종 조치 계획\n❌ 데이터를 불러올 수 없습니다.", "validated_moves": None, "report_md": ""}
+                    {
+                        "role": "assistant",
+                        "engine": "hybrid",
+                        "content": "",
+                        "action_md": "## 🧾 최종 조치 계획\n❌ 데이터를 불러올 수 없습니다.",
+                        "delta_html": "<h3>📊 생산계획 변경량 요약(Δ)</h3><p>데이터가 없습니다.</p>",
+                        "validated_moves": None,
+                        "report_md": "",
+                    }
                 )
             else:
                 result = ask_professional_scheduler(
@@ -822,19 +886,22 @@ if st.session_state.is_loading:
                     report = str(result)
                     status = "생산계획 조정 결과 파싱 실패"
 
-                # 채팅에 보여줄 건 "최종 조치 계획" 섹션만 (너가 요구한 형태)
+                # (1) 조치계획 텍스트
                 action_md = build_action_md(report)
+
+                # (2) Δ를 말풍선 내부용 HTML로 변환
+                delta_html = build_delta_html(validated_moves)
 
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
                         "engine": "hybrid",
-                        "content": "",  # hybrid는 content 대신 action_md로 말풍선 구성
+                        "content": "",
                         "action_md": action_md,
+                        "delta_html": delta_html,
                         "validated_moves": validated_moves,
                         "report_md": report,
-                        # ✅ 탭에서 CAPA 그래프까지 보이게 하려면 plan_df 저장(무거우면 끄기)
-                        "plan_df": plan_df,
+                        "plan_df": plan_df,  # CAPA 그래프 위해 유지 (무거우면 제거 가능)
                     }
                 )
 
@@ -850,7 +917,6 @@ if st.session_state.is_loading:
 
     except Exception as e:
         error_msg = f"❌ **오류 발생**\n\n```\n{str(e)}\n```"
-        # 오류는 legacy 스타일로 표시해도 되고, hybrid로 표시해도 됨
         st.session_state.messages.append({"role": "assistant", "engine": "legacy", "content": error_msg})
     finally:
         st.session_state.is_loading = False
