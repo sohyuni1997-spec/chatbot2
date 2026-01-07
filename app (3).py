@@ -1,4 +1,3 @@
-# app (3).py
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
@@ -18,7 +17,7 @@ from hybrid import ask_professional_scheduler
 st.set_page_config(page_title="orcHatStra", page_icon="🎯", layout="wide")
 
 
-# ==================== 이미지 로딩 (없어도 UI 유지) ====================
+# ==================== 이미지 로더 (기존 방식 유지) ====================
 def get_base64_of_bin_file(bin_file: str):
     candidates = [
         os.path.join("assets", bin_file),
@@ -41,25 +40,12 @@ def get_base64_of_bin_file(bin_file: str):
     return None
 
 
-# ✅ 너가 쓰던 파일명 우선, 없으면 assets 기본명 fallback
-logo_base64 = (
-    get_base64_of_bin_file("HSE.svg")
-    or get_base64_of_bin_file("logo.svg")
-    or get_base64_of_bin_file("logo.png")
-)
-ai_avatar_base64 = (
-    get_base64_of_bin_file("ai 아바타.png")
-    or get_base64_of_bin_file("ai_avatar.png")
-)
-user_avatar_base64 = (
-    get_base64_of_bin_file("이력서 사진.v카툰.png")
-    or get_base64_of_bin_file("user_avatar.png")
-)
+logo_base64 = get_base64_of_bin_file("HSE.svg") or get_base64_of_bin_file("logo.svg")
+ai_avatar_base64 = get_base64_of_bin_file("ai 아바타.png") or get_base64_of_bin_file("ai_avatar.png")
+user_avatar_base64 = get_base64_of_bin_file("이력서 사진.v카툰.png") or get_base64_of_bin_file("user_avatar.png")
 
 
-# ==================== CSS ====================
-# ✅ 핵심: Hybrid는 st.chat_message를 쓸 거라서
-#    [data-testid="stChatMessage"] 숨김은 절대 하면 안 됨!
+# ==================== CSS (채팅 UI "박스"만. 내용 변환 없음) ====================
 st.markdown(
     """
 <style>
@@ -75,16 +61,81 @@ st.markdown(
   z-index:9999;
 }
 
-/* Legacy 출력 영역을 구분하고 싶으면(선택)
-.legacy-wrap { max-width: 900px; margin: 0 auto; }
-*/
+/* "하이브리드 요약" 말풍선(텍스트만) */
+.hy-bubble-wrap{ max-width: 900px; margin: 0 auto; padding: 12px 20px; }
+.hy-row{ display:flex; margin-bottom: 14px; align-items:flex-start; }
+.hy-row.user{ flex-direction: row-reverse; }
+.hy-avatar{
+  width:40px; height:40px; border-radius:50%;
+  overflow:hidden; margin:0 12px;
+  box-shadow:0 3px 10px rgba(0,0,0,0.15);
+  background:#fff;
+}
+.hy-avatar img{ width:100%; height:100%; object-fit:cover; display:block; }
+.hy-bubble{
+  max-width: 70%;
+  padding: 12px 16px;
+  border-radius: 18px;
+  line-height: 1.6;
+  font-size: 15px;
+  background: white;
+  border: 1px solid #E5E5EA;
+}
+.hy-bubble.user{
+  background: linear-gradient(135deg,#007AFF,#0051D5);
+  color: white;
+  border: none;
+}
 
-/* expander */
-.streamlit-expanderHeader{
-  background-color: #FFFFFF !important;
-  border-radius:16px !important;
-  border:1px solid #E5E5EA !important;
-  padding:12px 16px !important;
+/* 버블 내부 표 스타일 */
+.hy-bubble table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 14px;
+}
+.hy-bubble table th {
+  background-color: #f0f0f0;
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: left;
+  font-weight: 600;
+}
+.hy-bubble table td {
+  padding: 8px;
+  border: 1px solid #ddd;
+}
+.hy-bubble table tr:nth-child(even) {
+  background-color: #f9f9f9;
+}
+.hy-bubble.user table th {
+  background-color: rgba(255,255,255,0.2);
+  color: white;
+  border-color: rgba(255,255,255,0.3);
+}
+.hy-bubble.user table td {
+  border-color: rgba(255,255,255,0.3);
+}
+
+/* 버블 내부 코드블록 스타일 */
+.hy-bubble pre {
+  background-color: #f5f5f5;
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+.hy-bubble code {
+  background-color: #f5f5f5;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+}
+.hy-bubble.user pre {
+  background-color: rgba(255,255,255,0.2);
+}
+.hy-bubble.user code {
+  background-color: rgba(255,255,255,0.2);
 }
 </style>
 """,
@@ -102,16 +153,18 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
 st.markdown("<div style='height:90px'></div>", unsafe_allow_html=True)
 
 
-# ==================== Secrets 처리 ====================
+# ==================== Secrets ====================
 try:
-    URL = st.secrets.get("SUPABASE_URL", "")
-    KEY = st.secrets.get("SUPABASE_KEY", "")
-    GENAI_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    URL = st.secrets.get("SUPABASE_URL")
+    KEY = st.secrets.get("SUPABASE_KEY")
+    GENAI_KEY = st.secrets.get("GEMINI_API_KEY")
 except Exception:
     URL, KEY, GENAI_KEY = "", "", ""
+
 
 @st.cache_resource
 def init_supabase():
@@ -149,12 +202,84 @@ def extract_date(text: str | None):
     return None
 
 
+def markdown_to_html(text: str) -> str:
+    """
+    간단한 markdown → HTML 변환
+    표, 코드블록, 볼드, 이탤릭, 링크 등을 HTML로 변환
+    """
+    if not text:
+        return ""
+    
+    html = text
+    
+    # 코드블록 (```)
+    html = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', html, flags=re.DOTALL)
+    
+    # 인라인 코드 (`)
+    html = re.sub(r'`([^`]+)`', r'<code>\1</code>', html)
+    
+    # 볼드 (**)
+    html = re.sub(r'\*\*([^\*]+)\*\*', r'<strong>\1</strong>', html)
+    
+    # 이탤릭 (*)
+    html = re.sub(r'\*([^\*]+)\*', r'<em>\1</em>', html)
+    
+    # 링크
+    html = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html)
+    
+    # 표 변환 (markdown table → HTML table)
+    lines = html.split('\n')
+    in_table = False
+    result_lines = []
+    
+    for i, line in enumerate(lines):
+        # 표 감지 (|로 시작하거나 포함)
+        if '|' in line and line.strip().startswith('|'):
+            if not in_table:
+                # 표 시작
+                result_lines.append('<table>')
+                in_table = True
+                
+                # 헤더 행
+                cells = [cell.strip() for cell in line.strip().split('|')[1:-1]]
+                result_lines.append('<thead><tr>')
+                for cell in cells:
+                    result_lines.append(f'<th>{cell}</th>')
+                result_lines.append('</tr></thead>')
+                result_lines.append('<tbody>')
+                
+            elif i > 0 and re.match(r'^\s*\|[\s\-:]+\|\s*$', line):
+                # 구분선 (|---|---|) 무시
+                continue
+            else:
+                # 데이터 행
+                cells = [cell.strip() for cell in line.strip().split('|')[1:-1]]
+                result_lines.append('<tr>')
+                for cell in cells:
+                    result_lines.append(f'<td>{cell}</td>')
+                result_lines.append('</tr>')
+        else:
+            if in_table:
+                # 표 종료
+                result_lines.append('</tbody></table>')
+                in_table = False
+            result_lines.append(line)
+    
+    # 표가 끝나지 않은 경우
+    if in_table:
+        result_lines.append('</tbody></table>')
+    
+    html = '\n'.join(result_lines)
+    
+    # 줄바꿈을 <br>로
+    html = html.replace('\n', '<br>')
+    
+    return html
+
+
 @st.cache_data(ttl=600)
 def fetch_data(target_date: str | None = None):
-    """
-    하이브리드용 데이터 로드
-    - legacy 경로 영향 없음
-    """
+    """하이브리드용 데이터 로드 (legacy 경로 영향 없음)"""
     try:
         if target_date:
             dt = datetime.strptime(target_date, "%Y-%m-%d")
@@ -178,14 +303,12 @@ def fetch_data(target_date: str | None = None):
         product_map, plt_map = {}, {}
         if not plan_df.empty and "product_name" in plan_df.columns:
             plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
-
             if "plt" in plan_df.columns:
                 plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
-
             if "line" in plan_df.columns:
                 product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
 
-            # 기존 로직 유지: T6는 전 라인 가능 처리
+            # T6 예외 유지(기존 로직)
             for k in list(product_map.keys()):
                 if "T6" in str(k).upper():
                     product_map[k] = ["조립1", "조립2", "조립3"]
@@ -198,10 +321,7 @@ def fetch_data(target_date: str | None = None):
 
 
 def moves_to_delta_df(validated_moves: list[dict] | None) -> pd.DataFrame:
-    """
-    Δ(변경량) DataFrame 생성
-    - 표 깨짐 방지: expander에서 st.dataframe으로만 보여주기 위한 데이터 준비
-    """
+    """Δ는 markdown 표 금지 → DataFrame으로만 생성"""
     if not validated_moves:
         return pd.DataFrame(columns=["date", "item", "line", "delta"])
 
@@ -224,51 +344,67 @@ def moves_to_delta_df(validated_moves: list[dict] | None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["date", "item", "line", "delta"])
 
 
-# ==================== 렌더링 ====================
-def render_message(msg: dict):
-    """
-    ✅ 핵심
-    - legacy: st.markdown 그대로 (영향 0)
-    - hybrid: st.chat_message + st.markdown (표/마크다운 완전 보장)
-    """
-    role = msg.get("role")
-    engine = msg.get("engine")  # "legacy" | "hybrid"
-    content = msg.get("content", "")
-
-    if engine == "legacy":
-        # ✅ legacy 0 영향: 기존 Streamlit markdown 렌더링 그대로
-        st.markdown(content)
-        return
-
-    # ✅ hybrid는 chat_message로 렌더 (표/헤더/리스트 깨짐 방지)
-    avatar = None
-    if role == "assistant" and ai_avatar_base64:
-        avatar = f"data:image/png;base64,{ai_avatar_base64}"
-    elif role == "user" and user_avatar_base64:
-        avatar = f"data:image/png;base64,{user_avatar_base64}"
-
-    with st.chat_message(role, avatar=avatar):
-        st.markdown(content)
-
-
-# ==================== 세션 상태 ====================
+# ==================== 세션 ====================
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # dict: {role, content, engine}
+    st.session_state.messages = []  # user/hybrid_summary/legacy
 if "is_loading" not in st.session_state:
     st.session_state.is_loading = False
 if "last_hybrid" not in st.session_state:
     st.session_state.last_hybrid = None
 
 
+# ==================== "하이브리드 요약 말풍선" 렌더 ====================
+def render_hybrid_bubble(role: str, text: str):
+    """
+    hybrid 대화창 렌더링 (markdown → HTML 변환 지원)
+    """
+    if not text:
+        return
+
+    if role == "user":
+        avatar_img = user_avatar_base64
+    else:
+        avatar_img = ai_avatar_base64
+
+    avatar_html = (
+        f'<img src="data:image/png;base64,{avatar_img}">' if avatar_img else ""
+    )
+    
+    # ✅ markdown을 HTML로 변환
+    content_html = markdown_to_html(text)
+
+    st.markdown(
+        f"""
+<div class="hy-bubble-wrap">
+  <div class="hy-row {role}">
+    <div class="hy-avatar">{avatar_html}</div>
+    <div class="hy-bubble {role}">
+      {content_html}
+    </div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 # ==================== 채팅 표시 ====================
+# ✅ legacy 출력은 "기존 Streamlit markdown 렌더링 그대로" 유지
 for m in st.session_state.messages:
-    if isinstance(m, dict):
-        render_message(m)
+    role = m.get("role")
+    engine = m.get("engine")  # "legacy" | "hybrid"
+    content = m.get("content", "")
+
+    if engine == "legacy":
+        # ✅ 영향 0: 기존 Streamlit markdown 그대로
+        st.markdown(content)
+    else:
+        # ✅ hybrid: markdown → HTML 변환하여 버블로 표시
+        render_hybrid_bubble(role, content)
 
 
 # ==================== 입력 ====================
 if prompt := st.chat_input("무엇을 도와드릴까요?"):
-    # user 메시지는 hybrid로 표시 (원하면 legacy로도 가능하지만 일단 통일)
     st.session_state.messages.append({"role": "user", "content": prompt, "engine": "hybrid"})
     st.session_state.is_loading = True
     st.rerun()
@@ -291,8 +427,8 @@ if st.session_state.is_loading:
             plan_df, hist_df, product_map, plt_map = fetch_data(target_date)
 
             if plan_df.empty:
-                answer = "❌ 데이터를 불러올 수 없습니다. 날짜/테이블을 확인해주세요."
-                st.session_state.messages.append({"role": "assistant", "content": answer, "engine": "hybrid"})
+                summary = "❌ 데이터를 불러올 수 없습니다. 날짜/테이블을 확인해주세요."
+                st.session_state.messages.append({"role": "assistant", "content": summary, "engine": "hybrid"})
                 st.session_state.last_hybrid = None
             else:
                 result = ask_professional_scheduler(
@@ -317,19 +453,15 @@ if st.session_state.is_loading:
                     else:
                         report = str(result)
                         status = "생산계획 조정 결과를 파싱하지 못했습니다."
-                        success = False
                 else:
                     report = str(result)
                     status = "생산계획 조정 결과를 파싱하지 못했습니다."
-                    success = False
 
-                # ✅ Hybrid 말풍선에서도 표가 “안 깨져야 한다” 요구 반영:
-                #    => hybrid 답변은 chat_message + st.markdown 이므로 표가 깨지지 않음.
-                #    (원하면 아래에서 report 전체 대신 status+핵심만 출력하도록 줄일 수도 있음)
-                bubble_text = f"{'✅' if success else '⚠️'} {status}"
-                st.session_state.messages.append({"role": "assistant", "content": bubble_text, "engine": "hybrid"})
+                # ✅ 말풍선에 전체 report 표시 (markdown 표 포함)
+                summary = f"{'✅' if success else '⚠️'} {status}\n\n{report}"
+                st.session_state.messages.append({"role": "assistant", "content": summary, "engine": "hybrid"})
 
-                # 상세 보기 데이터 저장 (expander에서 표/Δ/검증/CAPA/원문)
+                # ✅ 상세 보기 데이터 저장
                 st.session_state.last_hybrid = {
                     "status": status,
                     "success": bool(success),
@@ -365,29 +497,24 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
 
     st.markdown("---")
     with st.expander("📦 상세 보기", expanded=False):
-        t1, t2, t3, t4, t5 = st.tabs(["🧾 조치계획/원문", "📊 Δ(표)", "🔎 검증", "📈 CAPA 그래프", "📄 전체 원문"])
+        t1, t2, t3, t4 = st.tabs(["🧾 조치계획", "📊 Δ", "🔎 검증/원문", "📈 CAPA 그래프"])
 
         with t1:
-            # Streamlit native markdown
+            # ✅ 조치계획: Streamlit native markdown
             st.markdown(report_md)
 
         with t2:
-            # Δ는 dataframe으로만 (표 깨짐 원천 차단)
+            # ✅ Δ: 무조건 dataframe
             delta_df = moves_to_delta_df(validated_moves)
             if delta_df.empty:
                 st.info("Δ(변경량) 데이터가 없습니다.")
             else:
+                # 보기 좋게 피벗
                 pivot = (
-                    delta_df.pivot_table(
-                        index=["date", "item"],
-                        columns="line",
-                        values="delta",
-                        aggfunc="sum",
-                        fill_value=0,
-                    )
+                    delta_df.pivot_table(index=["date", "item"], columns="line", values="delta", aggfunc="sum", fill_value=0)
                     .reset_index()
                 )
-                # 컬럼 정렬/보강
+                # 컬럼 정렬
                 for col in ["조립1", "조립2", "조립3"]:
                     if col not in pivot.columns:
                         pivot[col] = 0
@@ -395,11 +522,11 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                 st.dataframe(pivot, use_container_width=True)
 
         with t3:
-            # 검증/원문 (일단 report 전체를 그대로)
+            # ✅ 검증/원문: Streamlit native markdown
             st.markdown(report_md)
 
         with t4:
-            # CAPA 그래프 + 상세 데이터
+            # ✅ CAPA 그래프: plotly + dataframe
             if isinstance(plan_df, pd.DataFrame) and (not plan_df.empty) and ("qty_1차" in plan_df.columns):
                 daily = plan_df.groupby(["plan_date", "line"])["qty_1차"].sum().reset_index()
                 daily.columns = ["plan_date", "line", "current_qty"]
@@ -413,13 +540,9 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                     if line in chart_data.columns:
                         fig.add_trace(go.Bar(name=line, x=chart_data.index, y=chart_data[line]))
 
+                # CAPA limit line
                 for line, limit in CAPA_LIMITS.items():
-                    fig.add_hline(
-                        y=limit,
-                        line_dash="dash",
-                        annotation_text=f"{line} 한계: {limit:,}",
-                        annotation_position="right",
-                    )
+                    fig.add_hline(y=limit, line_dash="dash", annotation_text=f"{line} 한계: {limit:,}", annotation_position="right")
 
                 fig.update_layout(
                     barmode="group",
@@ -438,10 +561,6 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                 st.dataframe(daily, use_container_width=True)
             else:
                 st.info("CAPA 그래프를 그릴 데이터가 없습니다.")
-
-        with t5:
-            # 전체 원문이 너무 길면 st.text가 더 안전할 때도 있음
-            st.markdown(report_md)
 
 
 # ==================== END ====================
