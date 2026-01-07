@@ -18,7 +18,7 @@ from hybrid import ask_professional_scheduler
 st.set_page_config(page_title="orcHatStra", page_icon="🎯", layout="wide")
 
 
-# ==================== 이미지 로더 (기존 방식 유지) ====================
+# ==================== 이미지 로딩 (없어도 UI 유지) ====================
 def get_base64_of_bin_file(bin_file: str):
     candidates = [
         os.path.join("assets", bin_file),
@@ -41,12 +41,25 @@ def get_base64_of_bin_file(bin_file: str):
     return None
 
 
-logo_base64 = get_base64_of_bin_file("HSE.svg") or get_base64_of_bin_file("logo.svg")
-ai_avatar_base64 = get_base64_of_bin_file("ai 아바타.png") or get_base64_of_bin_file("ai_avatar.png")
-user_avatar_base64 = get_base64_of_bin_file("이력서 사진.v카툰.png") or get_base64_of_bin_file("user_avatar.png")
+# ✅ 너가 쓰던 파일명 우선, 없으면 assets 기본명 fallback
+logo_base64 = (
+    get_base64_of_bin_file("HSE.svg")
+    or get_base64_of_bin_file("logo.svg")
+    or get_base64_of_bin_file("logo.png")
+)
+ai_avatar_base64 = (
+    get_base64_of_bin_file("ai 아바타.png")
+    or get_base64_of_bin_file("ai_avatar.png")
+)
+user_avatar_base64 = (
+    get_base64_of_bin_file("이력서 사진.v카툰.png")
+    or get_base64_of_bin_file("user_avatar.png")
+)
 
 
-# ==================== CSS (채팅 UI “박스”만. 내용 변환 없음) ====================
+# ==================== CSS ====================
+# ✅ 핵심: Hybrid는 st.chat_message를 쓸 거라서
+#    [data-testid="stChatMessage"] 숨김은 절대 하면 안 됨!
 st.markdown(
     """
 <style>
@@ -62,30 +75,16 @@ st.markdown(
   z-index:9999;
 }
 
-/* “하이브리드 요약” 말풍선(텍스트만) */
-.hy-bubble-wrap{ max-width: 900px; margin: 0 auto; padding: 12px 20px; }
-.hy-row{ display:flex; margin-bottom: 14px; align-items:flex-start; }
-.hy-row.user{ flex-direction: row-reverse; }
-.hy-avatar{
-  width:40px; height:40px; border-radius:50%;
-  overflow:hidden; margin:0 12px;
-  box-shadow:0 3px 10px rgba(0,0,0,0.15);
-  background:#fff;
-}
-.hy-avatar img{ width:100%; height:100%; object-fit:cover; display:block; }
-.hy-bubble{
-  max-width: 70%;
-  padding: 12px 16px;
-  border-radius: 18px;
-  line-height: 1.6;
-  font-size: 15px;
-  background: white;
-  border: 1px solid #E5E5EA;
-}
-.hy-bubble.user{
-  background: linear-gradient(135deg,#007AFF,#0051D5);
-  color: white;
-  border: none;
+/* Legacy 출력 영역을 구분하고 싶으면(선택)
+.legacy-wrap { max-width: 900px; margin: 0 auto; }
+*/
+
+/* expander */
+.streamlit-expanderHeader{
+  background-color: #FFFFFF !important;
+  border-radius:16px !important;
+  border:1px solid #E5E5EA !important;
+  padding:12px 16px !important;
 }
 </style>
 """,
@@ -103,18 +102,16 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
 st.markdown("<div style='height:90px'></div>", unsafe_allow_html=True)
 
 
-# ==================== Secrets ====================
+# ==================== Secrets 처리 ====================
 try:
-    URL = st.secrets.get("SUPABASE_URL")
-    KEY = st.secrets.get("SUPABASE_KEY")
-    GENAI_KEY = st.secrets.get("GEMINI_API_KEY")
+    URL = st.secrets.get("SUPABASE_URL", "")
+    KEY = st.secrets.get("SUPABASE_KEY", "")
+    GENAI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     URL, KEY, GENAI_KEY = "", "", ""
-
 
 @st.cache_resource
 def init_supabase():
@@ -154,7 +151,10 @@ def extract_date(text: str | None):
 
 @st.cache_data(ttl=600)
 def fetch_data(target_date: str | None = None):
-    """하이브리드용 데이터 로드 (legacy 경로 영향 없음)"""
+    """
+    하이브리드용 데이터 로드
+    - legacy 경로 영향 없음
+    """
     try:
         if target_date:
             dt = datetime.strptime(target_date, "%Y-%m-%d")
@@ -178,12 +178,14 @@ def fetch_data(target_date: str | None = None):
         product_map, plt_map = {}, {}
         if not plan_df.empty and "product_name" in plan_df.columns:
             plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
+
             if "plt" in plan_df.columns:
                 plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
+
             if "line" in plan_df.columns:
                 product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
 
-            # T6 예외 유지(기존 로직)
+            # 기존 로직 유지: T6는 전 라인 가능 처리
             for k in list(product_map.keys()):
                 if "T6" in str(k).upper():
                     product_map[k] = ["조립1", "조립2", "조립3"]
@@ -196,7 +198,10 @@ def fetch_data(target_date: str | None = None):
 
 
 def moves_to_delta_df(validated_moves: list[dict] | None) -> pd.DataFrame:
-    """Δ는 markdown 표 금지 → DataFrame으로만 생성"""
+    """
+    Δ(변경량) DataFrame 생성
+    - 표 깨짐 방지: expander에서 st.dataframe으로만 보여주기 위한 데이터 준비
+    """
     if not validated_moves:
         return pd.DataFrame(columns=["date", "item", "line", "delta"])
 
@@ -219,64 +224,51 @@ def moves_to_delta_df(validated_moves: list[dict] | None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["date", "item", "line", "delta"])
 
 
-# ==================== 세션 ====================
+# ==================== 렌더링 ====================
+def render_message(msg: dict):
+    """
+    ✅ 핵심
+    - legacy: st.markdown 그대로 (영향 0)
+    - hybrid: st.chat_message + st.markdown (표/마크다운 완전 보장)
+    """
+    role = msg.get("role")
+    engine = msg.get("engine")  # "legacy" | "hybrid"
+    content = msg.get("content", "")
+
+    if engine == "legacy":
+        # ✅ legacy 0 영향: 기존 Streamlit markdown 렌더링 그대로
+        st.markdown(content)
+        return
+
+    # ✅ hybrid는 chat_message로 렌더 (표/헤더/리스트 깨짐 방지)
+    avatar = None
+    if role == "assistant" and ai_avatar_base64:
+        avatar = f"data:image/png;base64,{ai_avatar_base64}"
+    elif role == "user" and user_avatar_base64:
+        avatar = f"data:image/png;base64,{user_avatar_base64}"
+
+    with st.chat_message(role, avatar=avatar):
+        st.markdown(content)
+
+
+# ==================== 세션 상태 ====================
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # user/hybrid_summary/legacy
+    st.session_state.messages = []  # dict: {role, content, engine}
 if "is_loading" not in st.session_state:
     st.session_state.is_loading = False
 if "last_hybrid" not in st.session_state:
     st.session_state.last_hybrid = None
 
 
-# ==================== “하이브리드 요약 말풍선” 렌더(텍스트만, 변환 없음) ====================
-def render_hybrid_bubble(role: str, text: str):
-    if not text:
-        return
-
-    if role == "user":
-        avatar_img = user_avatar_base64
-    else:
-        avatar_img = ai_avatar_base64
-
-    avatar_html = (
-        f'<img src="data:image/png;base64,{avatar_img}">' if avatar_img else ""
-    )
-
-    st.markdown(
-        f"""
-<div class="hy-bubble-wrap">
-  <div class="hy-row {role}">
-    <div class="hy-avatar">{avatar_html}</div>
-    <div class="hy-bubble {role}">
-      <!-- ✅ 내용은 “텍스트만”. 표/Δ/긴 글 금지 -->
-      {text}
-    </div>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
 # ==================== 채팅 표시 ====================
-# ✅ legacy 출력은 “기존 Streamlit markdown 렌더링 그대로” 유지해야 하므로
-#    legacy 답변은 절대 HTML 버블로 감싸지 않음.
 for m in st.session_state.messages:
-    role = m.get("role")
-    engine = m.get("engine")  # "legacy" | "hybrid"
-    content = m.get("content", "")
-
-    if engine == "legacy":
-        # ✅ 영향 0: 기존 Streamlit markdown 그대로
-        st.markdown(content)
-    else:
-        # ✅ hybrid: 요약 텍스트만 버블로
-        render_hybrid_bubble(role, content)
+    if isinstance(m, dict):
+        render_message(m)
 
 
 # ==================== 입력 ====================
 if prompt := st.chat_input("무엇을 도와드릴까요?"):
-    # user는 hybrid 버블로 보여도 “표 없음”이라 안전
+    # user 메시지는 hybrid로 표시 (원하면 legacy로도 가능하지만 일단 통일)
     st.session_state.messages.append({"role": "user", "content": prompt, "engine": "hybrid"})
     st.session_state.is_loading = True
     st.rerun()
@@ -299,8 +291,8 @@ if st.session_state.is_loading:
             plan_df, hist_df, product_map, plt_map = fetch_data(target_date)
 
             if plan_df.empty:
-                summary = "❌ 데이터를 불러올 수 없습니다. 날짜/테이블을 확인해주세요."
-                st.session_state.messages.append({"role": "assistant", "content": summary, "engine": "hybrid"})
+                answer = "❌ 데이터를 불러올 수 없습니다. 날짜/테이블을 확인해주세요."
+                st.session_state.messages.append({"role": "assistant", "content": answer, "engine": "hybrid"})
                 st.session_state.last_hybrid = None
             else:
                 result = ask_professional_scheduler(
@@ -325,15 +317,19 @@ if st.session_state.is_loading:
                     else:
                         report = str(result)
                         status = "생산계획 조정 결과를 파싱하지 못했습니다."
+                        success = False
                 else:
                     report = str(result)
                     status = "생산계획 조정 결과를 파싱하지 못했습니다."
+                    success = False
 
-                # ✅ 말풍선: 텍스트 요약만 (표/Δ/긴 검증글 금지)
-                summary = f"{'✅' if success else '⚠️'} {status}\n\n(아래 ‘상세 보기’에서 조치계획/Δ/검증/CAPA/원문을 확인하세요.)"
-                st.session_state.messages.append({"role": "assistant", "content": summary, "engine": "hybrid"})
+                # ✅ Hybrid 말풍선에서도 표가 “안 깨져야 한다” 요구 반영:
+                #    => hybrid 답변은 chat_message + st.markdown 이므로 표가 깨지지 않음.
+                #    (원하면 아래에서 report 전체 대신 status+핵심만 출력하도록 줄일 수도 있음)
+                bubble_text = f"{'✅' if success else '⚠️'} {status}"
+                st.session_state.messages.append({"role": "assistant", "content": bubble_text, "engine": "hybrid"})
 
-                # ✅ 상세 보기 데이터 저장
+                # 상세 보기 데이터 저장 (expander에서 표/Δ/검증/CAPA/원문)
                 st.session_state.last_hybrid = {
                     "status": status,
                     "success": bool(success),
@@ -369,27 +365,29 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
 
     st.markdown("---")
     with st.expander("📦 상세 보기", expanded=False):
-        t1, t2, t3, t4 = st.tabs(["🧾 조치계획", "📊 Δ", "🔎 검증/원문", "📈 CAPA 그래프"])
+        t1, t2, t3, t4, t5 = st.tabs(["🧾 조치계획/원문", "📊 Δ(표)", "🔎 검증", "📈 CAPA 그래프", "📄 전체 원문"])
 
         with t1:
-            # ✅ 조치계획: Streamlit native markdown
-            # (report_md 전체 중 조치계획만 추출하고 싶으면 여기서 파싱해도 되지만,
-            #  원칙상 “말풍선 파싱 금지”는 말풍선에 적용되는 것으로 이해 → expander 영역 파싱은 OK.
-            #  파싱도 싫으면 report_md 그대로 보여주고 사용자에게 섹션을 찾게 해도 됨.)
+            # Streamlit native markdown
             st.markdown(report_md)
 
         with t2:
-            # ✅ Δ: 무조건 dataframe
+            # Δ는 dataframe으로만 (표 깨짐 원천 차단)
             delta_df = moves_to_delta_df(validated_moves)
             if delta_df.empty:
                 st.info("Δ(변경량) 데이터가 없습니다.")
             else:
-                # 보기 좋게 피벗
                 pivot = (
-                    delta_df.pivot_table(index=["date", "item"], columns="line", values="delta", aggfunc="sum", fill_value=0)
+                    delta_df.pivot_table(
+                        index=["date", "item"],
+                        columns="line",
+                        values="delta",
+                        aggfunc="sum",
+                        fill_value=0,
+                    )
                     .reset_index()
                 )
-                # 컬럼 정렬
+                # 컬럼 정렬/보강
                 for col in ["조립1", "조립2", "조립3"]:
                     if col not in pivot.columns:
                         pivot[col] = 0
@@ -397,11 +395,11 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                 st.dataframe(pivot, use_container_width=True)
 
         with t3:
-            # ✅ 검증/원문: Streamlit native markdown (긴 글 OK)
+            # 검증/원문 (일단 report 전체를 그대로)
             st.markdown(report_md)
 
         with t4:
-            # ✅ CAPA 그래프: plotly + dataframe
+            # CAPA 그래프 + 상세 데이터
             if isinstance(plan_df, pd.DataFrame) and (not plan_df.empty) and ("qty_1차" in plan_df.columns):
                 daily = plan_df.groupby(["plan_date", "line"])["qty_1차"].sum().reset_index()
                 daily.columns = ["plan_date", "line", "current_qty"]
@@ -415,9 +413,13 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                     if line in chart_data.columns:
                         fig.add_trace(go.Bar(name=line, x=chart_data.index, y=chart_data[line]))
 
-                # CAPA limit line
                 for line, limit in CAPA_LIMITS.items():
-                    fig.add_hline(y=limit, line_dash="dash", annotation_text=f"{line} 한계: {limit:,}", annotation_position="right")
+                    fig.add_hline(
+                        y=limit,
+                        line_dash="dash",
+                        annotation_text=f"{line} 한계: {limit:,}",
+                        annotation_position="right",
+                    )
 
                 fig.update_layout(
                     barmode="group",
@@ -436,6 +438,10 @@ if not st.session_state.is_loading and st.session_state.last_hybrid:
                 st.dataframe(daily, use_container_width=True)
             else:
                 st.info("CAPA 그래프를 그릴 데이터가 없습니다.")
+
+        with t5:
+            # 전체 원문이 너무 길면 st.text가 더 안전할 때도 있음
+            st.markdown(report_md)
 
 
 # ==================== END ====================
