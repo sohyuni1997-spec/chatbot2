@@ -1,5 +1,5 @@
 """
-hybrid2.py
+hybrid.py
 - 2026년 1월 대응용 하이브리드 엔진 (Python 분석 + AI 전략 + Python 검증 + Python 폴백)
 - app (3).py 호출 시그니처 완전 호환
 
@@ -1187,3 +1187,4 @@ def ask_professional_scheduler(
     )
 
     return report, success, [], status, final_moves
+
