@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple, Optional
+from copy import deepcopy
 
 import pandas as pd
 import google.generativeai as genai
@@ -107,6 +107,78 @@ def _normalize_line_guess(question: str) -> Optional[str]:
         return "조립3"
     return None
 
+
+# ========================================================================
+# CAPA 이벤트(잔업/특근) 자동 제안 유틸 (데모용)
+# - '생산량 이동(Δ)'과 섞이지 않도록, 이벤트는 보고서에만 별도 표시 (방법 A)
+# ========================================================================
+
+def _round_up_to_multiple(x: int, base: int) -> int:
+    if base <= 0:
+        return x
+    return ((x + base - 1) // base) * base
+
+def _suggest_capa_events_auto(
+    plan_df: pd.DataFrame,
+    question_date: str,
+    target_line: str,
+    shortfall_qty: int,
+    plt_base: int,
+    max_days: int = 2,
+) -> List[Dict[str, Any]]:
+    """달성률이 너무 낮고(CAPA 부족) 미달이 남을 때, 잔업/특근 CAPA 상향을 자동으로 제안.
+    - 이벤트는 '추가 생산'이 아니라 '수용 CAPA 증가'로만 처리(Δ 표에 넣지 않음).
+    """
+    if shortfall_qty <= 0:
+        return []
+
+    workdays = get_workdays_from_db(plan_df, start_date_str=question_date, direction="future", days_count=50)
+    candidates = [d for d in workdays if d > question_date][: max_days]
+    if not candidates:
+        return []
+
+    need = _round_up_to_multiple(int(shortfall_qty), max(plt_base, 1))
+
+    events: List[Dict[str, Any]] = []
+    if len(candidates) == 1:
+        events.append({"date": candidates[0], "line": target_line, "type": "특근", "delta_capa": need})
+        return events
+
+    first = _round_up_to_multiple(need // 2, max(plt_base, 1))
+    second = max(0, need - first)
+
+    if first > 0:
+        events.append({"date": candidates[0], "line": target_line, "type": "특근", "delta_capa": first})
+    if second > 0:
+        events.append({"date": candidates[1], "line": target_line, "type": "잔업", "delta_capa": second})
+    return events
+
+def _apply_capa_events_to_status(
+    capa_status: Dict[str, Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    capa_limits: Dict[str, int],
+):
+    """capa_status에 이벤트를 반영(유효 CAPA = max/remaining 증가)."""
+    for ev in events:
+        d = ev["date"]
+        ln = ev["line"]
+        inc = int(ev.get("delta_capa", 0) or 0)
+        if inc <= 0:
+            continue
+        key = f"{d}_{ln}"
+        if key not in capa_status:
+            base = int(capa_limits.get(ln, 0) or 0)
+            capa_status[key] = {"max": base, "remaining": base}
+        capa_status[key]["max"] = int(capa_status[key].get("max", 0) or 0) + inc
+        capa_status[key]["remaining"] = int(capa_status[key].get("remaining", 0) or 0) + inc
+
+def _format_capa_events_md(events: List[Dict[str, Any]]) -> str:
+    if not events:
+        return ""
+    out = ["## 🛠 CAPA 이벤트(잔업/특근) 적용"]
+    for ev in events:
+        out.append(f"- {ev['date']} {ev['line']}: **{ev['type']}**으로 유효 CAPA **+{int(ev['delta_capa']):,}개**")
+    return "\n".join(out) + "\n\n"
 
 def _infer_target_line(question: str, plan_df: pd.DataFrame, question_date: str) -> Optional[str]:
     """질문에 라인 명시가 없으면, 품목 키워드/당일 최대 물량 라인으로 추론"""
@@ -508,15 +580,9 @@ def step5_ask_ai_strategy(
   ]
 }}
 
-중요 규칙(⚠️ 이 규칙 위반 시 Python 검증에서 즉시 탈락함):
+중요 규칙:
 - "from", "to" 형식: 반드시 "YYYY-MM-DD_라인명"
-- qty는 반드시 해당 품목 PLT 단위의 정수배(= k * plt, k는 1 이상의 정수)
-  - 예: J9 plt=175 → 175, 350, 525... / WL plt=200 → 200, 400, 600...
-- qty가 plt보다 작거나, plt의 배수가 아니면 절대 제안하지 말 것 (60/120/210 같은 값 금지)
-- 목적지 remaining이 plt 미만이면 그 목적지(to)는 사용하지 말 것
-- 목적지 remaining/납기여유(max_movable)/필요감축(remain)을 고려하여:
-  feasible_qty = floor(min(remaining, max_movable, remain_need) / plt) * plt 로 "내림"해서 제안
-  (feasible_qty == 0 이면 해당 move는 만들지 말 것)
+- qty는 반드시 PLT의 정수배
 - 목적지 remaining 초과 금지
 - A2XX는 조립3 절대 금지
 - 전용 모델(비 T6/A2XX)은 타라인 이동 금지(동일라인 날짜 이동만)
@@ -1000,24 +1066,6 @@ def python_fallback_increase(
     if remain <= 0:
         return [], []
 
-
-    # --- PLT/메타 조회 헬퍼: plan_df에 plt 컬럼이 없을 수 있으므로 constraint_info 기준으로 잡는다.
-    def _norm(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
-    _meta_map = {_norm(it.get("name", "")): it for it in constraint_info if it.get("name")}
-    _meta_keys = list(_meta_map.keys())
-
-    def _get_meta(prod_name: str) -> Optional[Dict[str, Any]]:
-        k = _norm(prod_name)
-        if k in _meta_map:
-            return _meta_map[k]
-        # 느슨한 매칭 (부분 문자열)
-        for kk in _meta_keys:
-            if kk and (kk in k or k in kk):
-                return _meta_map[kk]
-        return None
-
     # [1] 같은날 타라인 -> target_line (T6만)
     date_df = plan_df[plan_df["plan_date"] == question_date].copy()
     if not date_df.empty:
@@ -1034,8 +1082,7 @@ def python_fallback_increase(
                 name = str(row.get("product_name", ""))
                 if "T6" not in name.upper():
                     continue
-                meta = _get_meta(name)
-                plt = int((meta.get("plt") if meta else 1) or 1)
+                plt = int(row.get("plt", 1) or 1)
                 src_qty = int(row.get("qty_1차", 0) or 0)
 
                 take = min(remain, src_qty)
@@ -1364,6 +1411,7 @@ def ask_professional_scheduler(
     ai_failed = False
     ai_error_msg = ""
     extra_notes: List[str] = []
+    report_prefix: str = ""
 
     fact_report = build_ai_fact_report(
         constraint_info=constraint_info,
@@ -1401,28 +1449,27 @@ def ask_professional_scheduler(
     )
 
     # 6.5) AI가 부족하면 Python 폴백으로 채우기
-    # - 폴백은 '계획을 만들어보는 단계'에서 CAPA를 깎지 않기 위해 deepcopy(capa_status)로 시뮬레이션
-    # - 검증(step6) 통과한 move만 원본 capa_status에 반영됨
-    # - 폴백 계획이 검증에서 일부 탈락할 수 있으므로, 검증 후 remaining을 재계산해 최대 2회까지 재시도
-    max_fallback_attempts = 2
-    fallback_attempt = 0
+    # - 폴백은 capa_status를 직접 깎지 않고(deepcopy로 시뮬레이션), 검증 통과분만 원본 capa_status에 반영
+    # - 검증 후 remaining을 다시 계산하여 최대 2회까지 재시도
+    def _sum_qty(moves: List[Dict[str, Any]]) -> int:
+        return sum(int(m.get("qty", 0) or 0) for m in (moves or []))
 
-    while True:
-        current_done = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
-        remaining = max(0, operation_qty - current_done)
+    op_kr = "증량" if operation_mode == "increase" else "감축"
 
-        if remaining <= 0 or fallback_attempt >= max_fallback_attempts:
-            break
+    remaining = max(0, operation_qty - _sum_qty(final_moves))
+    fb_notes_all: List[str] = []
 
-        fallback_attempt += 1
+    fb_attempts = 0
+    while remaining > 0 and fb_attempts < 2:
+        fb_attempts += 1
 
-        sim_capa_status = deepcopy(capa_status)
+        sim_capa = deepcopy(capa_status)
 
         if operation_mode == "reduce":
             fb_moves, fb_notes = python_fallback_reduce(
                 plan_df=plan_df,
                 constraint_info=constraint_info,
-                capa_status=sim_capa_status,
+                capa_status=sim_capa,
                 question_date=question_date,
                 target_line=target_line,
                 need_reduce=remaining,
@@ -1431,44 +1478,117 @@ def ask_professional_scheduler(
             fb_moves, fb_notes = python_fallback_increase(
                 plan_df=plan_df,
                 constraint_info=constraint_info,
-                capa_status=sim_capa_status,
+                capa_status=sim_capa,
                 question_date=question_date,
                 target_line=target_line,
                 need_increase=remaining,
             )
 
-        # 폴백 move는 검증을 한 번 더 태우는 게 안전
+        # 폴백 내부의 "미달" 숫자는 검증 탈락/재시도 때문에 어긋날 수 있으므로,
+        # 여기서는 "미달" 문구는 버리고 최종 remaining 기준으로 마지막에 1번만 출력한다.
+        fb_notes_all.extend([n for n in (fb_notes or []) if "미달" not in n])
+
         if fb_moves:
             fb_strategy = {"strategy": "Python 폴백 채움", "explanation": "AI 부족분을 기본 로직으로 보완", "moves": fb_moves}
             fb_valid, fb_viol = step6_validate_ai_strategy(
                 ai_strategy=fb_strategy,
                 constraint_info=constraint_info,
-                capa_status=capa_status,  # ✅ 원본에만 반영
+                capa_status=capa_status,
                 plan_df=plan_df,
                 target_line=target_line,
             )
-            if fb_valid:
-                final_moves.extend(fb_valid)
-            if fb_viol:
-                violations.extend([f"[폴백검증] {x}" for x in fb_viol])
-
-        # 폴백이 내부적으로 남긴 '미달' 노트는 검증 탈락을 반영하지 못할 수 있으니 제외하고,
-        # 기타 유용한 노트만 유지한다. (최종 미달 노트는 아래에서 재계산해 1번만 출력)
-        if fb_notes:
-            for n in fb_notes:
-                if ("감축 미달" in n) or ("증량 미달" in n):
-                    continue
-                extra_notes.append(n)
-
-    # ✅ 최종 remaining 기준으로 미달 노트를 정확히 1번만 추가
-    final_done = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
-    final_remaining = max(0, operation_qty - final_done)
-    if final_remaining > 0:
-        if operation_mode == "reduce":
-            extra_notes.append(f"⚠️ [폴백] 감축 미달: 추가로 {final_remaining:,}개 더 감축 필요")
+            final_moves.extend(fb_valid)
+            violations.extend([f"[폴백검증] {x}" for x in fb_viol])
         else:
-            extra_notes.append(f"⚠️ [폴백] 증량 미달: 추가로 {final_remaining:,}개 더 필요")
+            break
 
+        remaining = max(0, operation_qty - _sum_qty(final_moves))
+
+    extra_notes.extend(fb_notes_all)
+    if remaining > 0:
+        extra_notes.append(f"⚠️ [폴백] {op_kr} 미달: 추가로 {remaining:,}개 더 {op_kr} 필요")
+
+    # 6.6) (데모용) 달성률이 너무 낮고, 실패 원인이 CAPA 부족일 때 '잔업/특근'으로 CAPA를 상향한 개선안을 한 번 더 시뮬레이션
+    baseline_done = _sum_qty(final_moves)
+    baseline_achievement = (baseline_done / operation_qty * 100) if operation_qty else 0
+    baseline_shortfall = max(0, operation_qty - baseline_done)
+
+    auto_threshold = 70.0  # 데모용: 70% 미만이면 운영 대안(잔업/특근) 시뮬레이션
+    if operation_mode == "reduce" and baseline_shortfall > 0 and baseline_achievement < auto_threshold:
+        capa_related_fail = any(("CAPA 부족" in v or "조정 불가" in v) for v in violations)
+        if capa_related_fail:
+            plts = [int(it.get("plt", 0) or 0) for it in stock_res.get("items", []) if int(it.get("plt", 0) or 0) > 0]
+            plt_base = min(plts) if plts else 1
+
+            capa_events = _suggest_capa_events_auto(
+                plan_df=plan_df,
+                question_date=question_date,
+                target_line=target_line,
+                shortfall_qty=baseline_shortfall,
+                plt_base=plt_base,
+                max_days=2,
+            )
+
+            if capa_events:
+                capa_status2 = step3_analyze_destination_capacity(plan_df, question_date, target_line, capa_limits)
+                _apply_capa_events_to_status(capa_status2, capa_events, capa_limits)
+
+                final2, viol2 = step6_validate_ai_strategy(
+                    ai_strategy=ai_strategy,
+                    constraint_info=constraint_info,
+                    capa_status=capa_status2,
+                    plan_df=plan_df,
+                    target_line=target_line,
+                )
+
+                remaining2 = max(0, operation_qty - _sum_qty(final2))
+                fb_notes2: List[str] = []
+                fb_attempts2 = 0
+                while remaining2 > 0 and fb_attempts2 < 2:
+                    fb_attempts2 += 1
+                    sim2 = deepcopy(capa_status2)
+
+                    fb_moves2, fb_notes_tmp = python_fallback_reduce(
+                        plan_df=plan_df,
+                        constraint_info=constraint_info,
+                        capa_status=sim2,
+                        question_date=question_date,
+                        target_line=target_line,
+                        need_reduce=remaining2,
+                    )
+
+                    fb_notes2.extend([n for n in (fb_notes_tmp or []) if "미달" not in n])
+
+                    if fb_moves2:
+                        fb_strategy2 = {"strategy": "Python 폴백 채움", "explanation": "AI 부족분을 기본 로직으로 보완", "moves": fb_moves2}
+                        fb_valid2, fb_viol2 = step6_validate_ai_strategy(
+                            ai_strategy=fb_strategy2,
+                            constraint_info=constraint_info,
+                            capa_status=capa_status2,
+                            plan_df=plan_df,
+                            target_line=target_line,
+                        )
+                        final2.extend(fb_valid2)
+                        viol2.extend([f"[폴백검증] {x}" for x in fb_viol2])
+                    else:
+                        break
+
+                    remaining2 = max(0, operation_qty - _sum_qty(final2))
+
+                done2 = _sum_qty(final2)
+                ach2 = (done2 / operation_qty * 100) if operation_qty else 0
+
+                if ach2 > baseline_achievement + 0.1:
+                    report_prefix = _format_capa_events_md(capa_events)
+                    report_prefix += f"### 이벤트 적용 전 결과\n- 달성률: **{baseline_achievement:.1f}%** (미달 **{baseline_shortfall:,}개**)\n\n"
+                    report_prefix += f"### 이벤트 적용 후 결과(재계산)\n- 달성률: **{ach2:.1f}%**\n\n"
+
+                    final_moves = final2
+                    violations = viol2
+                    capa_status = capa_status2
+                    extra_notes = fb_notes2[:]
+                    if remaining2 > 0:
+                        extra_notes.append(f"⚠️ [폴백] 감축 미달: 추가로 {remaining2:,}개 더 감축 필요")
     # 최종 달성률 기반 success/status
     moved_total = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
     achievement = (moved_total / operation_qty * 100) if operation_qty else 0
@@ -1481,7 +1601,7 @@ def ask_professional_scheduler(
         success = False
 
     # 보고서
-    report = generate_full_report(
+    report = (report_prefix or "") + generate_full_report(
         stock_result=stock_res,
         items_with_slack=items_with_slack,
         capa_status=capa_status,
@@ -1503,4 +1623,3 @@ def ask_professional_scheduler(
     )
 
     return report, success, [], status, final_moves
-
