@@ -3,6 +3,7 @@ import pandas as pd
 from supabase import create_client, Client
 import google.generativeai as genai
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import plotly.graph_objects as go
 import re
 import base64
@@ -414,10 +415,9 @@ supabase: Client = init_supabase()
 genai.configure(api_key=GENAI_KEY)
 
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
-TEST_MODE = True
-TODAY = datetime(2026, 1, 5).date() if TEST_MODE else datetime.now().date()
-
-
+TEST_MODE = False  # 배포 기본값
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
+TODAY = datetime.now(SEOUL_TZ).date() if not TEST_MODE else datetime(2026, 1, 5).date()
 # ==================== 데이터 로드 (기존 유지) ====================
 @st.cache_data(ttl=600)
 def fetch_data(target_date=None):
@@ -441,30 +441,6 @@ def fetch_data(target_date=None):
         hist_df = pd.DataFrame(hist_res.data) if hist_res.data else pd.DataFrame()
 
         if not plan_df.empty:
-            # ✅ is_workday 타입 정규화: 'false' 문자열이 bool('false')==True로 오판되는 문제 방지
-            if "plan_date" in plan_df.columns:
-                plan_df["plan_date"] = plan_df["plan_date"].astype(str).str[:10]
-
-            if "is_workday" in plan_df.columns:
-                def _coerce_is_workday(v):
-                    if v is None:
-                        return False
-                    if isinstance(v, bool):
-                        return v
-                    if isinstance(v, (int, float)):
-                        try:
-                            return int(v) != 0
-                        except Exception:
-                            return False
-                    s = str(v).strip().lower()
-                    if s in ("true", "t", "1", "yes", "y", "on"):
-                        return True
-                    if s in ("false", "f", "0", "no", "n", "off", "", "null", "none", "nan"):
-                        return False
-                    return True
-
-                plan_df["is_workday"] = plan_df["is_workday"].apply(_coerce_is_workday)
-
             plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
             plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
             product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
@@ -839,7 +815,7 @@ def render_hybrid_details_tabs(report_md: str, plan_df: pd.DataFrame | None = No
                     margin=dict(l=20, r=20, t=40, b=20),
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"capa_chart_{abs(hash(report_md)) % 10**8}")
                 st.dataframe(daily, use_container_width=True)
             else:
                 st.info("CAPA 그래프를 그릴 데이터가 없습니다.")
