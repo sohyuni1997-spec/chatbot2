@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -507,9 +508,15 @@ def step5_ask_ai_strategy(
   ]
 }}
 
-중요 규칙:
+중요 규칙(⚠️ 이 규칙 위반 시 Python 검증에서 즉시 탈락함):
 - "from", "to" 형식: 반드시 "YYYY-MM-DD_라인명"
-- qty는 반드시 PLT의 정수배
+- qty는 반드시 해당 품목 PLT 단위의 정수배(= k * plt, k는 1 이상의 정수)
+  - 예: J9 plt=175 → 175, 350, 525... / WL plt=200 → 200, 400, 600...
+- qty가 plt보다 작거나, plt의 배수가 아니면 절대 제안하지 말 것 (60/120/210 같은 값 금지)
+- 목적지 remaining이 plt 미만이면 그 목적지(to)는 사용하지 말 것
+- 목적지 remaining/납기여유(max_movable)/필요감축(remain)을 고려하여:
+  feasible_qty = floor(min(remaining, max_movable, remain_need) / plt) * plt 로 "내림"해서 제안
+  (feasible_qty == 0 이면 해당 move는 만들지 말 것)
 - 목적지 remaining 초과 금지
 - A2XX는 조립3 절대 금지
 - 전용 모델(비 T6/A2XX)은 타라인 이동 금지(동일라인 날짜 이동만)
@@ -993,6 +1000,24 @@ def python_fallback_increase(
     if remain <= 0:
         return [], []
 
+
+    # --- PLT/메타 조회 헬퍼: plan_df에 plt 컬럼이 없을 수 있으므로 constraint_info 기준으로 잡는다.
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+    _meta_map = {_norm(it.get("name", "")): it for it in constraint_info if it.get("name")}
+    _meta_keys = list(_meta_map.keys())
+
+    def _get_meta(prod_name: str) -> Optional[Dict[str, Any]]:
+        k = _norm(prod_name)
+        if k in _meta_map:
+            return _meta_map[k]
+        # 느슨한 매칭 (부분 문자열)
+        for kk in _meta_keys:
+            if kk and (kk in k or k in kk):
+                return _meta_map[kk]
+        return None
+
     # [1] 같은날 타라인 -> target_line (T6만)
     date_df = plan_df[plan_df["plan_date"] == question_date].copy()
     if not date_df.empty:
@@ -1009,7 +1034,8 @@ def python_fallback_increase(
                 name = str(row.get("product_name", ""))
                 if "T6" not in name.upper():
                     continue
-                plt = int(row.get("plt", 1) or 1)
+                meta = _get_meta(name)
+                plt = int((meta.get("plt") if meta else 1) or 1)
                 src_qty = int(row.get("qty_1차", 0) or 0)
 
                 take = min(remain, src_qty)
@@ -1375,15 +1401,28 @@ def ask_professional_scheduler(
     )
 
     # 6.5) AI가 부족하면 Python 폴백으로 채우기
-    current_done = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
-    remaining = max(0, operation_qty - current_done)
+    # - 폴백은 '계획을 만들어보는 단계'에서 CAPA를 깎지 않기 위해 deepcopy(capa_status)로 시뮬레이션
+    # - 검증(step6) 통과한 move만 원본 capa_status에 반영됨
+    # - 폴백 계획이 검증에서 일부 탈락할 수 있으므로, 검증 후 remaining을 재계산해 최대 2회까지 재시도
+    max_fallback_attempts = 2
+    fallback_attempt = 0
 
-    if remaining > 0:
+    while True:
+        current_done = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
+        remaining = max(0, operation_qty - current_done)
+
+        if remaining <= 0 or fallback_attempt >= max_fallback_attempts:
+            break
+
+        fallback_attempt += 1
+
+        sim_capa_status = deepcopy(capa_status)
+
         if operation_mode == "reduce":
             fb_moves, fb_notes = python_fallback_reduce(
                 plan_df=plan_df,
                 constraint_info=constraint_info,
-                capa_status=capa_status,
+                capa_status=sim_capa_status,
                 question_date=question_date,
                 target_line=target_line,
                 need_reduce=remaining,
@@ -1392,7 +1431,7 @@ def ask_professional_scheduler(
             fb_moves, fb_notes = python_fallback_increase(
                 plan_df=plan_df,
                 constraint_info=constraint_info,
-                capa_status=capa_status,
+                capa_status=sim_capa_status,
                 question_date=question_date,
                 target_line=target_line,
                 need_increase=remaining,
@@ -1404,13 +1443,31 @@ def ask_professional_scheduler(
             fb_valid, fb_viol = step6_validate_ai_strategy(
                 ai_strategy=fb_strategy,
                 constraint_info=constraint_info,
-                capa_status=capa_status,
+                capa_status=capa_status,  # ✅ 원본에만 반영
                 plan_df=plan_df,
                 target_line=target_line,
             )
-            final_moves.extend(fb_valid)
-            violations.extend([f"[폴백검증] {x}" for x in fb_viol])
-        extra_notes.extend(fb_notes)
+            if fb_valid:
+                final_moves.extend(fb_valid)
+            if fb_viol:
+                violations.extend([f"[폴백검증] {x}" for x in fb_viol])
+
+        # 폴백이 내부적으로 남긴 '미달' 노트는 검증 탈락을 반영하지 못할 수 있으니 제외하고,
+        # 기타 유용한 노트만 유지한다. (최종 미달 노트는 아래에서 재계산해 1번만 출력)
+        if fb_notes:
+            for n in fb_notes:
+                if ("감축 미달" in n) or ("증량 미달" in n):
+                    continue
+                extra_notes.append(n)
+
+    # ✅ 최종 remaining 기준으로 미달 노트를 정확히 1번만 추가
+    final_done = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
+    final_remaining = max(0, operation_qty - final_done)
+    if final_remaining > 0:
+        if operation_mode == "reduce":
+            extra_notes.append(f"⚠️ [폴백] 감축 미달: 추가로 {final_remaining:,}개 더 감축 필요")
+        else:
+            extra_notes.append(f"⚠️ [폴백] 증량 미달: 추가로 {final_remaining:,}개 더 필요")
 
     # 최종 달성률 기반 success/status
     moved_total = sum(int(m["qty"]) for m in final_moves) if final_moves else 0
