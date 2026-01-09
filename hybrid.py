@@ -30,6 +30,10 @@ import google.generativeai as genai
 TODAY = None
 CAPA_LIMITS = None
 
+# 데모/운영 가독성: 한 번에 너무 큰 이동을 방지 (수량/PLT 기준)
+MAX_SINGLE_MOVE_QTY = 1000        # 한 번의 move에서 허용하는 최대 수량(개) 상한(PLT 정수배로 내림)
+MAX_SINGLE_MOVE_PLTS = 5          # 한 번의 move에서 허용하는 최대 PLT 상한(아이템 PLT 기준)
+
 
 def initialize_globals(today, capa_limits):
     global TODAY, CAPA_LIMITS
@@ -612,6 +616,69 @@ def step5_ask_ai_strategy(
 # 6단계: Python 검증 (AI moves를 안전하게 필터/조정)
 # ========================================================================
 
+
+def _cap_and_split_moves(
+    moves: List[Dict[str, Any]],
+    constraint_info: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """AI/폴백이 제안한 moves에서 '한 번에 너무 큰 이동'을 방지.
+    - 아이템의 PLT 단위(plt)를 기준으로 MAX_SINGLE_MOVE_QTY, MAX_SINGLE_MOVE_PLTS 상한 적용
+    - 상한을 넘는 qty는 PLT 정수배로 쪼개서 여러 move로 분리
+    - 마지막 남은 수량이 1PLT 미만이면(PLT 단위 제약으로 어차피 불가) remainder는 남겨두고 다음 단계에서 다른 품목/날짜로 메우게 함
+    """
+    if not moves:
+        return []
+
+    name_to_item = {x.get("name"): x for x in (constraint_info or [])}
+    out: List[Dict[str, Any]] = []
+
+    for m in moves:
+        if not isinstance(m, dict):
+            continue
+        item_name = m.get("item") or m.get("name")
+        try:
+            qty = int(m.get("qty", 0))
+        except Exception:
+            qty = 0
+        if not item_name or qty <= 0:
+            continue
+
+        item = name_to_item.get(item_name) or {}
+        try:
+            plt = int(item.get("plt") or m.get("plt") or 1)
+        except Exception:
+            plt = 1
+        if plt <= 0:
+            plt = 1
+
+        cap_qty = int(MAX_SINGLE_MOVE_QTY)
+        cap_qty = min(cap_qty, int(MAX_SINGLE_MOVE_PLTS) * plt) if plt > 0 else cap_qty
+        cap_qty = max(plt, cap_qty)
+
+        remain = qty
+        while remain > 0:
+            chunk = min(remain, cap_qty)
+            # PLT 정수배로 내림
+            if plt > 1:
+                chunk = (chunk // plt) * plt
+            if chunk <= 0:
+                break
+
+            mm = dict(m)
+            mm["item"] = item_name
+            mm["qty"] = int(chunk)
+            mm["plt"] = int(chunk // plt)
+            out.append(mm)
+
+            remain -= int(chunk)
+            # 1PLT 미만 remainder는 다음 단계(다른 품목/날짜)에서 메우도록 남겨둠
+            if remain > 0 and remain < plt:
+                break
+
+    return out
+
+
+
 def step6_validate_ai_strategy(
     ai_strategy: Dict[str, Any],
     constraint_info: List[Dict[str, Any]],
@@ -732,12 +799,9 @@ def step6_validate_ai_strategy(
             from_date = from_loc.split("_", 1)[0].strip()
             from_line = from_loc.split("_", 1)[1].strip()
 
-        # -----------------------
-        # (0) no-op 이동 방지 (같은 날짜/같은 라인으로의 이동은 의미 없음)
-        # - 이런 move가 들어오면 Δ 표에는 변화가 없는데, 감축량/달성률 집계가 왜곡될 수 있음
-        # -----------------------
+        # 동일 날짜/라인으로의 이동은 의미가 없고(Δ도 0), 집계 왜곡을 유발하므로 금지
         if from_date and from_line and (from_date == to_date) and (from_line == to_line):
-            violations.append(f"❌ [{idx}] {item_name}: 같은 날짜/라인({to_date}_{to_line})로 이동(no-op) 불가")
+            violations.append(f"❌ [{idx}] {item_name}: 동일 위치 이동 불가 ({from_loc} → {to_loc})")
             continue
 
         # -----------------------
@@ -1448,6 +1512,9 @@ def ask_professional_scheduler(
         strategy_source = "Python 폴백 (AI 오류)"
 
     # 6) 검증
+    # 한 번에 너무 큰 이동(>약 1,000개/5PLT)을 방지하도록 move를 분할/상한 적용
+    ai_strategy["moves"] = _cap_and_split_moves(ai_strategy.get("moves", []), constraint_info)
+
     final_moves, violations = step6_validate_ai_strategy(
         ai_strategy=ai_strategy,
         constraint_info=constraint_info,
@@ -1498,6 +1565,7 @@ def ask_professional_scheduler(
 
         if fb_moves:
             fb_strategy = {"strategy": "Python 폴백 채움", "explanation": "AI 부족분을 기본 로직으로 보완", "moves": fb_moves}
+            fb_strategy["moves"] = _cap_and_split_moves(fb_strategy.get("moves", []), constraint_info)
             fb_valid, fb_viol = step6_validate_ai_strategy(
                 ai_strategy=fb_strategy,
                 constraint_info=constraint_info,
@@ -1521,7 +1589,7 @@ def ask_professional_scheduler(
     baseline_achievement = (baseline_done / operation_qty * 100) if operation_qty else 0
     baseline_shortfall = max(0, operation_qty - baseline_done)
 
-    auto_threshold = 85.0  # 데모용: 달성률이 낮으면(기본 85% 미만) 운영 대안(잔업/특근) 시뮬레이션
+    auto_threshold = 70.0  # 데모용: 70% 미만이면 운영 대안(잔업/특근) 시뮬레이션
     if operation_mode == "reduce" and baseline_shortfall > 0 and baseline_achievement < auto_threshold:
         capa_related_fail = any(("CAPA 부족" in v or "조정 불가" in v) for v in violations)
         if capa_related_fail:
