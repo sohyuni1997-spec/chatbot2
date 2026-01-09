@@ -38,7 +38,7 @@ ai_avatar_base64 = get_base64_of_bin_file("ai 아바타.png")
 user_avatar_base64 = get_base64_of_bin_file("이력서 사진.v카툰.png")
 
 
-# ==================== CSS (기존 유지 + ✅ hybrid bubble table CSS 추가) ====================
+# ==================== CSS (✅ UI/가독성 개선 - 표 가로 스크롤 + 컴팩트 + 반응형) ====================
 st.markdown(
     f"""
 <style>
@@ -101,7 +101,7 @@ st.markdown(
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 0 40px;
+        padding: 0 2.5rem;
         box-shadow: 0 2px 10px var(--shadow-light);
         backdrop-filter: blur(20px);
         -webkit-backdrop-filter: blur(20px);
@@ -112,11 +112,11 @@ st.markdown(
         max-width: 1400px;
         display: flex;
         align-items: center;
-        gap: 20px;
+        gap: 1.25rem;
     }}
 
     .header-logo {{
-        height: 50px;
+        height: 3.125rem;
         width: auto;
         display: block;
     }}
@@ -125,31 +125,31 @@ st.markdown(
         color: var(--header-text);
         font-weight: 800;
         font-size: 2.5rem;
-        letter-spacing: -1.5px;
+        letter-spacing: -0.09375rem;
         font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
         margin: 0;
     }}
 
-    /* ✅ Streamlit 기본 채팅 UI 숨기기 유지 (너 커스텀 채팅 방식 유지) */
+    /* ✅ Streamlit 기본 채팅 UI 숨기기 유지 */
     [data-testid="stChatMessage"] {{
         display: none !important;
     }}
 
     .chat-container {{
-        max-width: 900px;
+        max-width: 56.25rem;
         margin: 0 auto;
-        padding: 20px;
+        padding: 1.25rem;
     }}
 
     .message-row {{
         display: flex;
-        margin-bottom: 16px;
+        margin-bottom: 1rem;
         align-items: flex-start;
         animation: fadeIn 0.3s ease-in;
     }}
 
     @keyframes fadeIn {{
-        from {{ opacity: 0; transform: translateY(10px); }}
+        from {{ opacity: 0; transform: translateY(0.625rem); }}
         to {{ opacity: 1; transform: translateY(0); }}
     }}
 
@@ -164,25 +164,25 @@ st.markdown(
     }}
 
     .avatar {{
-        width: 40px;
-        height: 40px;
-        min-width: 40px;
-        min-height: 40px;
+        width: 2.5rem;
+        height: 2.5rem;
+        min-width: 2.5rem;
+        min-height: 2.5rem;
         border-radius: 50%;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 20px;
+        font-size: 1.25rem;
         flex-shrink: 0;
-        box-shadow: 0 3px 10px var(--shadow-medium);
+        box-shadow: 0 0.1875rem 0.625rem var(--shadow-medium);
         overflow: hidden;
     }}
 
     .avatar.user {{
         background: transparent;
-        margin-left: 12px;
+        margin-left: 0.75rem;
         padding: 0;
-        box-shadow: 0 3px 10px var(--shadow-medium);
+        box-shadow: 0 0.1875rem 0.625rem var(--shadow-medium);
     }}
 
     .avatar.user img {{
@@ -195,9 +195,9 @@ st.markdown(
 
     .avatar.assistant {{
         background: transparent;
-        margin-right: 12px;
+        margin-right: 0.75rem;
         padding: 0;
-        box-shadow: 0 3px 10px var(--shadow-medium);
+        box-shadow: 0 0.1875rem 0.625rem var(--shadow-medium);
     }}
 
     .avatar.assistant img {{
@@ -208,11 +208,12 @@ st.markdown(
         display: block;
     }}
 
+    /* ✅ 반응형 말풍선: PC 75%, 모바일 85% */
     .message-bubble {{
-        max-width: 70%;
-        padding: 12px 18px;
-        border-radius: 20px;
-        font-size: 15px;
+        max-width: 75%;
+        padding: 0.75rem 1.125rem;
+        border-radius: 1.25rem;
+        font-size: 0.9375rem;
         line-height: 1.6;
         word-wrap: break-word;
         overflow-wrap: break-word;
@@ -221,34 +222,34 @@ st.markdown(
     .message-bubble.user {{
         background: linear-gradient(135deg, var(--user-gradient-start) 0%, var(--user-gradient-end) 100%);
         color: white;
-        border-top-right-radius: 4px;
-        box-shadow: 0 3px 12px rgba(0, 122, 255, 0.25);
+        border-top-right-radius: 0.25rem;
+        box-shadow: 0 0.1875rem 0.75rem rgba(0, 122, 255, 0.25);
     }}
 
     .message-bubble.assistant {{
         background-color: var(--bg-secondary);
         color: var(--text-primary);
-        border-top-left-radius: 4px;
-        box-shadow: 0 2px 8px var(--shadow-light);
+        border-top-left-radius: 0.25rem;
+        box-shadow: 0 0.125rem 0.5rem var(--shadow-light);
         border: 1px solid var(--border-color);
     }}
 
     .loading-bubble {{
-        max-width: 70%;
-        padding: 16px 18px;
-        border-radius: 20px;
+        max-width: 75%;
+        padding: 1rem 1.125rem;
+        border-radius: 1.25rem;
         background-color: var(--bg-secondary);
-        border-top-left-radius: 4px;
-        box-shadow: 0 2px 8px var(--shadow-light);
+        border-top-left-radius: 0.25rem;
+        box-shadow: 0 0.125rem 0.5rem var(--shadow-light);
         border: 1px solid var(--border-color);
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 0.375rem;
     }}
 
     .loading-dot {{
-        width: 8px;
-        height: 8px;
+        width: 0.5rem;
+        height: 0.5rem;
         border-radius: 50%;
         background-color: #8E8E93;
         animation: loadingPulse 1.4s ease-in-out infinite;
@@ -263,40 +264,21 @@ st.markdown(
         30% {{ opacity: 1; transform: scale(1.1); }}
     }}
 
-    /* dataframe 영역 기본 스타일 */
-    [data-testid="stDataFrame"] {{
-        background-color: var(--bg-secondary);
-        border-radius: 12px;
-        overflow: hidden;
-        border: 1px solid var(--border-color);
-    }}
-
-    /* expander */
-    .streamlit-expanderHeader {{
-        background-color: var(--bg-secondary) !important;
-        border-radius: 16px !important;
-        color: var(--text-primary) !important;
-        font-weight: 500 !important;
-        border: 1px solid var(--border-color) !important;
-        padding: 12px 16px !important;
-        box-shadow: 0 2px 6px var(--shadow-light) !important;
-    }}
-
-    /* ✅✅ hybrid 말풍선 내부 HTML table 깨짐 방지 */
+    /* ✅✅✅ 표 가로 스크롤 + 컴팩트 디자인 (핵심 수정) */
     .message-bubble.assistant table {{
         width: 100%;
         border-collapse: collapse;
-        table-layout: fixed;
-        margin: 8px 0;
-        font-size: 14px;
-        overflow: hidden;
-        border-radius: 12px;
+        margin: 0.5rem 0;
+        font-size: 0.9rem;
+        display: block;
+        overflow-x: auto;
+        border-radius: 0.75rem;
     }}
 
     .message-bubble.assistant th,
     .message-bubble.assistant td {{
         border: 1px solid var(--border-color);
-        padding: 8px 10px;
+        padding: 0.375rem 0.625rem;
         text-align: left;
         vertical-align: top;
         white-space: nowrap;
@@ -305,12 +287,85 @@ st.markdown(
     .message-bubble.assistant th {{
         background: rgba(0,0,0,0.03);
         font-weight: 600;
+        position: sticky;
+        top: 0;
+        z-index: 10;
     }}
 
     /* item 컬럼(첫 컬럼)은 줄바꿈 허용 */
     .message-bubble.assistant td:first-child,
     .message-bubble.assistant th:first-child {{
         white-space: normal;
+        min-width: 8rem;
+    }}
+
+    .message-bubble.assistant tbody tr:nth-child(even) {{
+        background: rgba(0,0,0,0.02);
+    }}
+
+    .message-bubble.assistant tbody tr:hover {{
+        background: rgba(0,0,0,0.05);
+        transition: background 0.2s ease;
+    }}
+
+    /* dataframe 영역 기본 스타일 */
+    [data-testid="stDataFrame"] {{
+        background-color: var(--bg-secondary);
+        border-radius: 0.75rem;
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+    }}
+
+    /* expander */
+    .streamlit-expanderHeader {{
+        background-color: var(--bg-secondary) !important;
+        border-radius: 1rem !important;
+        color: var(--text-primary) !important;
+        font-weight: 500 !important;
+        border: 1px solid var(--border-color) !important;
+        padding: 0.75rem 1rem !important;
+        box-shadow: 0 0.125rem 0.375rem var(--shadow-light) !important;
+    }}
+
+    /* ✅ 모바일 반응형 */
+    @media (max-width: 768px) {{
+        .message-bubble {{
+            max-width: 85%;
+            padding: 0.625rem 0.875rem;
+            font-size: 0.875rem;
+        }}
+
+        .message-bubble.assistant table {{
+            font-size: 0.8rem;
+        }}
+
+        .message-bubble.assistant th,
+        .message-bubble.assistant td {{
+            padding: 0.3125rem 0.5rem;
+        }}
+
+        .avatar {{
+            width: 2rem;
+            height: 2rem;
+            min-width: 2rem;
+            min-height: 2rem;
+        }}
+
+        .header-title {{
+            font-size: 1.75rem;
+        }}
+
+        .header-logo {{
+            height: 2.5rem;
+        }}
+
+        .fixed-header {{
+            padding: 0 1rem;
+        }}
+
+        .loading-bubble {{
+            max-width: 85%;
+        }}
     }}
 </style>
 """,
@@ -339,15 +394,15 @@ else:
 st.markdown(header_html, unsafe_allow_html=True)
 
 
-# ==================== Secrets (기존 유지: 너 코드 그대로) ====================
+# ==================== Secrets (기존 유지: 원본 코드 그대로) ====================
 try:
     URL = st.secrets.get("SUPABASE_URL", "https://qipphcdzlmqidhrjnjtt.supabase.co")
-    KEY = st.secrets.get("SUPABASE_KEY", "...")
-    GENAI_KEY = st.secrets.get("GEMINI_API_KEY", "...")
+    KEY = st.secrets.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFpcHBoY2R6bG1xaWRocmpuanR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY5NTIwMTIsImV4cCI6MjA4MjUyODAxMn0.AsuvjVGCLUJF_IPvQevYASaM6uRF2C6F-CjwC3eCNVk")
+    GENAI_KEY = st.secrets.get("GEMINI_API_KEY", "AIzaSyAQaiwm46yOITEttdr0ify7duXCW3TwGRo")
 except Exception:
     URL = "https://qipphcdzlmqidhrjnjtt.supabase.co"
-    KEY = "..."
-    GENAI_KEY = "..."
+    KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFpcHBoY2R6bG1xaWRocmpuanR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY5NTIwMTIsImV4cCI6MjA4MjUyODAxMn0.AsuvjVGCLUJF_IPvQevYASaM6uRF2C6F-CjwC3eCNVk"
+    GENAI_KEY = "AIzaSyAQaiwm46yOITEttdr0ify7duXCW3TwGRo"
 
 
 @st.cache_resource
@@ -386,6 +441,30 @@ def fetch_data(target_date=None):
         hist_df = pd.DataFrame(hist_res.data) if hist_res.data else pd.DataFrame()
 
         if not plan_df.empty:
+            # ✅ is_workday 타입 정규화: 'false' 문자열이 bool('false')==True로 오판되는 문제 방지
+            if "plan_date" in plan_df.columns:
+                plan_df["plan_date"] = plan_df["plan_date"].astype(str).str[:10]
+
+            if "is_workday" in plan_df.columns:
+                def _coerce_is_workday(v):
+                    if v is None:
+                        return False
+                    if isinstance(v, bool):
+                        return v
+                    if isinstance(v, (int, float)):
+                        try:
+                            return int(v) != 0
+                        except Exception:
+                            return False
+                    s = str(v).strip().lower()
+                    if s in ("true", "t", "1", "yes", "y", "on"):
+                        return True
+                    if s in ("false", "f", "0", "no", "n", "off", "", "null", "none", "nan"):
+                        return False
+                    return True
+
+                plan_df["is_workday"] = plan_df["is_workday"].apply(_coerce_is_workday)
+
             plan_df["name_clean"] = plan_df["product_name"].apply(lambda x: re.sub(r"\s+", "", str(x)).strip())
             plt_map = plan_df.groupby("name_clean")["plt"].first().to_dict()
             product_map = plan_df.groupby("name_clean")["line"].unique().to_dict()
