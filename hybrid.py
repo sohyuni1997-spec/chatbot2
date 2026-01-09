@@ -34,6 +34,7 @@ CAPA_LIMITS = None
 
 # 사람 같은 분산: T6 '같은날 타라인 이송'은 우선 1회, 최대 5PLT까지만 사용
 MAX_T6_SAMEDAY_SHIFT_PLTS = 5
+ENGINE_VERSION = "HUMANPLAN_V5"
 def initialize_globals(today, capa_limits):
     global TODAY, CAPA_LIMITS
     TODAY = today
@@ -1331,6 +1332,7 @@ def generate_full_report(
 
     report = []
     report.append(f"# 📊 {question_date} {target_line} 하이브리드 수사 보고서")
+    report.append(f"🔧 엔진 버전: {ENGINE_VERSION}")
     report.append("")
     report.append("## 🔍 수사 방식")
     report.append(f"- 전략 수립: {strategy_source}")
