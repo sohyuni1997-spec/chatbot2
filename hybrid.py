@@ -50,35 +50,84 @@ def _safe_str_date(d) -> str:
     return d.strftime("%Y-%m-%d")
 
 
-def is_workday_in_db(plan_df: pd.DataFrame, date_str: str) -> bool:
-    """특정 날짜가 가동일인지 확인 (is_workday 컬럼 사용)"""
-    if plan_df.empty or "is_workday" not in plan_df.columns:
-        # is_workday가 없으면 "가동일 체크 불가"로 보고 True 처리(운영 정책에 따라 False로 바꿔도 됨)
+def _coerce_is_workday(value: Any) -> bool:
+    """Supabase is_workday 값(bool/int/str)을 안전하게 bool로 변환.
+
+    ✅ 핵심:
+    - 'false' 같은 문자열은 Python에서 bool('false') == True라서 그대로 쓰면 휴무일을 가동일로 오판함.
+    """
+    if value is None:
+        return False
+
+    # pandas / numpy bool 타입도 여기로 들어옴
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        try:
+            return int(value) != 0
+        except Exception:
+            return False
+
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "t", "1", "yes", "y", "on"):
+            return True
+        if v in ("false", "f", "0", "no", "n", "off", "", "null", "none", "nan"):
+            return False
+        # 그 외 문자열은 '값이 있다'로 보되, 보수적으로 True 처리
         return True
 
-    date_info = plan_df[plan_df["plan_date"] == date_str]
+    try:
+        return bool(value)
+    except Exception:
+        return False
+
+
+def is_workday_in_db(plan_df: pd.DataFrame, date_str: str) -> bool:
+    """특정 날짜가 가동일인지 확인 (is_workday 컬럼 사용)
+
+    - is_workday가 없으면 (가동일 체크 불가) → True 처리(기존 정책 유지)
+    - 날짜가 없으면 → False (안전)
+    """
+    if plan_df.empty or "is_workday" not in plan_df.columns:
+        return True
+
+    ds = str(date_str)[:10]
+    # plan_date가 timestamp 형태여도 매칭되게 [:10] 비교
+    date_col = plan_df["plan_date"].astype(str).str[:10]
+    date_info = plan_df[date_col == ds]
     if date_info.empty:
         return False
-    return bool(date_info.iloc[0]["is_workday"])
+
+    return _coerce_is_workday(date_info.iloc[0]["is_workday"])
 
 
-def get_workdays_from_db(plan_df: pd.DataFrame, start_date_str: str, direction="future", days_count=10) -> List[str]:
-    """DB의 is_workday 기반으로 가동일 리스트 반환"""
+def get_workdays_from_db(
+    plan_df: pd.DataFrame, start_date_str: str, direction: str = "future", days_count: int = 10
+) -> List[str]:
+    """DB의 is_workday 기반으로 가동일 리스트 반환 (휴무일은 제외)"""
     if plan_df.empty or "is_workday" not in plan_df.columns:
         return []
 
-    db_dates = plan_df[["plan_date", "is_workday"]].drop_duplicates().sort_values("plan_date")
+    db_dates = plan_df[["plan_date", "is_workday"]].copy()
+    db_dates["plan_date"] = db_dates["plan_date"].astype(str).str[:10]
+    db_dates["_is_workday_bool"] = db_dates["is_workday"].apply(_coerce_is_workday)
+
+    db_dates = db_dates.drop_duplicates(subset=["plan_date"]).sort_values("plan_date")
+
+    start = str(start_date_str)[:10]
 
     if direction == "future":
-        available = db_dates[(db_dates["plan_date"] >= start_date_str) & (db_dates["is_workday"] == True)]
+        available = db_dates[(db_dates["plan_date"] >= start) & (db_dates["_is_workday_bool"])]
         return available["plan_date"].head(days_count).tolist()
 
     # 과거: TODAY 이후만 (고정기간/정책에 맞게 조정 가능)
     today_str = TODAY.strftime("%Y-%m-%d") if TODAY else "1900-01-01"
     available = db_dates[
-        (db_dates["plan_date"] < start_date_str)
+        (db_dates["plan_date"] < start)
         & (db_dates["plan_date"] > today_str)
-        & (db_dates["is_workday"] == True)
+        & (db_dates["_is_workday_bool"])
     ]
     return available["plan_date"].tail(days_count).tolist()
 
@@ -1187,5 +1236,4 @@ def ask_professional_scheduler(
     )
 
     return report, success, [], status, final_moves
-
 
