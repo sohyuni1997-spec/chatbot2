@@ -3,6 +3,7 @@ import pandas as pd
 from supabase import create_client, Client
 import google.generativeai as genai
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import plotly.graph_objects as go
 import re
 import base64
@@ -414,8 +415,8 @@ supabase: Client = init_supabase()
 genai.configure(api_key=GENAI_KEY)
 
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
-TEST_MODE = True
-TODAY = datetime(2026, 1, 5).date() if TEST_MODE else datetime.now().date()
+TEST_MODE = False
+TODAY = datetime.now(ZoneInfo("Asia/Seoul")).date() if not TEST_MODE else datetime(2026, 1, 5).date()
 
 
 # ==================== 데이터 로드 (기존 유지) ====================
