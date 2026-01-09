@@ -733,6 +733,14 @@ def step6_validate_ai_strategy(
             from_line = from_loc.split("_", 1)[1].strip()
 
         # -----------------------
+        # (0) no-op 이동 방지 (같은 날짜/같은 라인으로의 이동은 의미 없음)
+        # - 이런 move가 들어오면 Δ 표에는 변화가 없는데, 감축량/달성률 집계가 왜곡될 수 있음
+        # -----------------------
+        if from_date and from_line and (from_date == to_date) and (from_line == to_line):
+            violations.append(f"❌ [{idx}] {item_name}: 같은 날짜/라인({to_date}_{to_line})로 이동(no-op) 불가")
+            continue
+
+        # -----------------------
         # (1) 물리 제약
         # -----------------------
         if item["is_a2xx"] and to_line == "조립3":
@@ -1513,7 +1521,7 @@ def ask_professional_scheduler(
     baseline_achievement = (baseline_done / operation_qty * 100) if operation_qty else 0
     baseline_shortfall = max(0, operation_qty - baseline_done)
 
-    auto_threshold = 70.0  # 데모용: 70% 미만이면 운영 대안(잔업/특근) 시뮬레이션
+    auto_threshold = 85.0  # 데모용: 달성률이 낮으면(기본 85% 미만) 운영 대안(잔업/특근) 시뮬레이션
     if operation_mode == "reduce" and baseline_shortfall > 0 and baseline_achievement < auto_threshold:
         capa_related_fail = any(("CAPA 부족" in v or "조정 불가" in v) for v in violations)
         if capa_related_fail:
