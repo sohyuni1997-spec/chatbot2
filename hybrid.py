@@ -50,88 +50,53 @@ def _safe_str_date(d) -> str:
     return d.strftime("%Y-%m-%d")
 
 
-def _coerce_is_workday(value: Any) -> bool:
-    """Supabase is_workday 값(bool/int/str)을 안전하게 bool로 변환.
-
-    ✅ 핵심:
-    - 'false' 같은 문자열은 Python에서 bool('false') == True라서 그대로 쓰면 휴무일을 가동일로 오판함.
-    """
-    if value is None:
+def _coerce_is_workday(v: Any) -> bool:
+    """is_workday 값이 bool/str/숫자 등으로 섞여 들어와도 안전하게 True/False로 변환"""
+    if isinstance(v, bool):
+        return v
+    if v is None:
         return False
-
-    # pandas / numpy bool 타입도 여기로 들어옴
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, (int, float)):
-        try:
-            return int(value) != 0
-        except Exception:
-            return False
-
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in ("true", "t", "1", "yes", "y", "on"):
-            return True
-        if v in ("false", "f", "0", "no", "n", "off", "", "null", "none", "nan"):
-            return False
-        # 그 외 문자열은 '값이 있다'로 보되, 보수적으로 True 처리
+    s = str(v).strip().lower()
+    if s in ("true", "t", "1", "y", "yes"):
         return True
-
+    if s in ("false", "f", "0", "n", "no", "", "none", "null"):
+        return False
     try:
-        return bool(value)
+        return bool(int(float(s)))
     except Exception:
         return False
 
 
 def is_workday_in_db(plan_df: pd.DataFrame, date_str: str) -> bool:
-    """특정 날짜가 가동일인지 확인 (is_workday 컬럼 사용)
-
-    - is_workday가 없으면 (가동일 체크 불가) → True 처리(기존 정책 유지)
-    - 날짜가 없으면 → False (안전)
-    """
+    """특정 날짜가 가동일인지 확인 (is_workday 컬럼 사용)"""
     if plan_df.empty or "is_workday" not in plan_df.columns:
+        # is_workday가 없으면 "가동일 체크 불가"로 보고 True 처리(운영 정책에 따라 False로 바꿔도 됨)
         return True
 
-    ds = str(date_str)[:10]
-    # plan_date가 timestamp 형태여도 매칭되게 [:10] 비교
-    date_col = plan_df["plan_date"].astype(str).str[:10]
-    date_info = plan_df[date_col == ds]
+    date_info = plan_df[plan_df["plan_date"] == date_str]
     if date_info.empty:
         return False
-
     return _coerce_is_workday(date_info.iloc[0]["is_workday"])
-
-
-def get_workdays_from_db(
-    plan_df: pd.DataFrame, start_date_str: str, direction: str = "future", days_count: int = 10
-) -> List[str]:
-    """DB의 is_workday 기반으로 가동일 리스트 반환 (휴무일은 제외)"""
+def get_workdays_from_db(plan_df: pd.DataFrame, start_date_str: str, direction="future", days_count=10) -> List[str]:
+    """DB의 is_workday 기반으로 가동일 리스트 반환"""
     if plan_df.empty or "is_workday" not in plan_df.columns:
         return []
 
-    db_dates = plan_df[["plan_date", "is_workday"]].copy()
-    db_dates["plan_date"] = db_dates["plan_date"].astype(str).str[:10]
-    db_dates["_is_workday_bool"] = db_dates["is_workday"].apply(_coerce_is_workday)
-
-    db_dates = db_dates.drop_duplicates(subset=["plan_date"]).sort_values("plan_date")
-
-    start = str(start_date_str)[:10]
+    db_dates = plan_df[["plan_date", "is_workday"]].drop_duplicates().sort_values("plan_date").copy()
+    db_dates["__workday"] = db_dates["is_workday"].apply(_coerce_is_workday)
 
     if direction == "future":
-        available = db_dates[(db_dates["plan_date"] >= start) & (db_dates["_is_workday_bool"])]
+        available = db_dates[(db_dates["plan_date"] >= start_date_str) & (db_dates["__workday"] == True)]
         return available["plan_date"].head(days_count).tolist()
 
     # 과거: TODAY 이후만 (고정기간/정책에 맞게 조정 가능)
     today_str = TODAY.strftime("%Y-%m-%d") if TODAY else "1900-01-01"
     available = db_dates[
-        (db_dates["plan_date"] < start)
+        (db_dates["plan_date"] < start_date_str)
         & (db_dates["plan_date"] > today_str)
-        & (db_dates["_is_workday_bool"])
+        & (db_dates["__workday"] == True)
     ]
     return available["plan_date"].tail(days_count).tolist()
-
-
 def _normalize_line_guess(question: str) -> Optional[str]:
     if "조립1" in question:
         return "조립1"
@@ -296,13 +261,30 @@ def step3_analyze_destination_capacity(
 ) -> Dict[str, Dict[str, Any]]:
     """
     CAPA 현황:
-    - ✅ 같은날: 조립1/2/3 모두 (target_line 포함)  ← FIX
-    - 동일라인 미래 가동일(최대 10일)
+    - ✅ 같은날: 조립1/2/3 모두 (target_line 포함)
+    - ✅ 동일라인 미래 가동일(최대 N개)  (단, 전체 납기/데이터 범위 밖으로는 확장하지 않음)
+    - ✅ (옵션) 동일라인 과거 가동일(소수)  (단, TODAY(질문일) 이전/당일은 금지)
     """
-    future_workdays = get_workdays_from_db(plan_df, target_date, direction="future", days_count=10)
     capa_status: Dict[str, Dict[str, Any]] = {}
 
-    # ✅ [FIX] 같은날 CAPA: 모든 라인 포함 (target_line 포함)
+    # -------------------------------
+    # (A) 데이터 기반 "미래 확장 상한" = 마지막 납기일(=qty_0차가 있는 마지막 날짜)
+    #     - qty_0차가 없다면, plan_date 최대값을 상한으로 사용
+    # -------------------------------
+    horizon_end = None
+    if (not plan_df.empty) and ("plan_date" in plan_df.columns):
+        if "qty_0차" in plan_df.columns:
+            tmp = plan_df.copy()
+            tmp["qty_0차"] = pd.to_numeric(tmp["qty_0차"], errors="coerce").fillna(0)
+            due_df = tmp[tmp["qty_0차"] > 0]
+            if not due_df.empty:
+                horizon_end = str(due_df["plan_date"].max())[:10]
+        if not horizon_end:
+            horizon_end = str(plan_df["plan_date"].max())[:10]
+
+    # -------------------------------
+    # (B) 같은날 CAPA: 모든 라인 포함
+    # -------------------------------
     for line in ["조립1", "조립2", "조립3"]:
         cur = plan_df[(plan_df["plan_date"] == target_date) & (plan_df["line"] == line)]["qty_1차"].sum()
         cur = int(cur) if pd.notna(cur) else 0
@@ -316,14 +298,33 @@ def step3_analyze_destination_capacity(
             "usage_rate": (cur / capa_limits[line] * 100) if capa_limits[line] else 0,
         }
 
-    # 동일라인 미래
+    # -------------------------------
+    # (C) 동일라인 미래 가동일 후보
+    #     - 미래로 "많이 미루기"가 목적이 아니라,
+    #       가능한 후보를 넓게 보되 납기/데이터 상한(horizon_end) 안에서만,
+    #       그리고 최대 max_future_workdays개까지만 사용 (horizon_end가 가까우면 자동 축소)
+    # -------------------------------
+    max_future_workdays = 10
+
+    # DB is_workday 기준으로 horizon_end까지 가능한 미래 가동일을 넉넉히 모은 뒤
+    # max_future_workdays개까지만 사용
+    future_candidates = get_workdays_from_db(plan_df, target_date, direction="future", days_count=400)
+    future_candidates = [d for d in future_candidates if str(d)[:10] != target_date]
+    if horizon_end:
+        future_candidates = [d for d in future_candidates if str(d)[:10] <= horizon_end]
+    future_workdays = future_candidates[:max_future_workdays]
+
+    # 보강: is_workday가 없거나 리스트가 빈 경우, 달력으로 탐색(그래도 horizon_end 바깥은 금지)
     if not future_workdays:
-        # 보강: is_workday가 없거나 future list가 빈 경우, 10일 검색
         base = _safe_date(target_date)
-        for i in range(1, 11):
+        for i in range(1, 60):  # 넉넉히 보되 아래에서 잘라냄
             d = (base + timedelta(days=i)).strftime("%Y-%m-%d")
+            if horizon_end and d > horizon_end:
+                break
             if is_workday_in_db(plan_df, d):
                 future_workdays.append(d)
+            if len(future_workdays) >= max_future_workdays:
+                break
 
     for d in future_workdays:
         cur = plan_df[(plan_df["plan_date"] == d) & (plan_df["line"] == target_line)]["qty_1차"].sum()
@@ -338,9 +339,31 @@ def step3_analyze_destination_capacity(
             "usage_rate": (cur / capa_limits[target_line] * 100) if capa_limits[target_line] else 0,
         }
 
+    # -------------------------------
+    # (D) 동일라인 과거 가동일 후보 (선행 생산)
+    #     - 너무 많이 당기는 것을 방지: 5개 가동일만
+    #     - get_workdays_from_db가 "TODAY 이후만" 보장 (plan_date > today_str)
+    # -------------------------------
+    past_workdays = get_workdays_from_db(plan_df, target_date, direction="past", days_count=5)
+
+    for d in past_workdays:
+        # 안전: target_date보다 과거만
+        if str(d)[:10] >= target_date:
+            continue
+
+        cur = plan_df[(plan_df["plan_date"] == d) & (plan_df["line"] == target_line)]["qty_1차"].sum()
+        cur = int(cur) if pd.notna(cur) else 0
+        remaining = int(capa_limits[target_line] - cur)
+        capa_status[f"{d}_{target_line}"] = {
+            "date": d,
+            "line": target_line,
+            "current": cur,
+            "remaining": remaining,
+            "max": capa_limits[target_line],
+            "usage_rate": (cur / capa_limits[target_line] * 100) if capa_limits[target_line] else 0,
+        }
+
     return capa_status
-
-
 # ========================================================================
 # 4단계: 물리 제약 정리
 # ========================================================================
@@ -527,11 +550,76 @@ def step6_validate_ai_strategy(
         return [], ["❌ AI 전략 형식 오류: 'moves' 키가 없습니다."]
 
     name_to_item = {x["name"]: x for x in constraint_info}
-    validated = []
-    violations = []
+    validated: List[Dict[str, Any]] = []
+    violations: List[str] = []
+
+    today_str = TODAY.strftime("%Y-%m-%d") if TODAY else None
+
+    def _get_item_last_due(item_name: str) -> Optional[str]:
+        if plan_df.empty or ("qty_0차" not in plan_df.columns):
+            return None
+        df = plan_df[plan_df["product_name"] == item_name].copy()
+        if df.empty:
+            return None
+        df["qty_0차"] = pd.to_numeric(df["qty_0차"], errors="coerce").fillna(0)
+        due = df[df["qty_0차"] > 0]["plan_date"]
+        if due.empty:
+            return None
+        return str(due.max())[:10]
+
+    def _check_due_cumsum_after_move(item_name: str, from_date: str, to_date: str, qty_move: int) -> Tuple[bool, Optional[str]]:
+        """이동을 적용했을 때 품목별 누적 납기(cumsum1>=cumsum0)가 모든 날짜에서 유지되는지 검증"""
+        needed = {"product_name", "plan_date", "qty_0차", "qty_1차"}
+        if plan_df.empty or not needed.issubset(set(plan_df.columns)):
+            return True, None
+
+        df = plan_df[plan_df["product_name"] == item_name].copy()
+        if df.empty:
+            return True, None
+
+        daily = (
+            df.groupby("plan_date")[["qty_0차", "qty_1차"]]
+            .sum()
+            .reset_index()
+            .copy()
+        )
+        daily["qty_0차"] = pd.to_numeric(daily["qty_0차"], errors="coerce").fillna(0).astype(int)
+        daily["qty_1차"] = pd.to_numeric(daily["qty_1차"], errors="coerce").fillna(0).astype(int)
+
+        # from/to 날짜가 daily에 없을 수 있으니 보강
+        for d in [from_date, to_date]:
+            if d not in set(daily["plan_date"].astype(str).str[:10].tolist()):
+                daily = pd.concat([daily, pd.DataFrame([{"plan_date": d, "qty_0차": 0, "qty_1차": 0}])], ignore_index=True)
+
+        # plan_date 정규화
+        daily["plan_date"] = daily["plan_date"].astype(str).str[:10]
+        daily = daily.sort_values("plan_date").reset_index(drop=True)
+
+        # 이동 적용 (생산량만 이동, 수요(qty_0차)는 그대로)
+        # from에서 빼기
+        idx_from = daily.index[daily["plan_date"] == from_date]
+        idx_to = daily.index[daily["plan_date"] == to_date]
+        if len(idx_from) == 0 or len(idx_to) == 0:
+            return True, None
+
+        f = int(idx_from[0]); t = int(idx_to[0])
+
+        daily.loc[f, "qty_1차"] -= int(qty_move)
+        daily.loc[t, "qty_1차"] += int(qty_move)
+
+        # 음수 생산량은 불가
+        if daily.loc[f, "qty_1차"] < 0:
+            return False, from_date
+
+        daily["c0"] = daily["qty_0차"].cumsum()
+        daily["c1"] = daily["qty_1차"].cumsum()
+        bad = daily[daily["c1"] < daily["c0"]]
+        if bad.empty:
+            return True, None
+        return False, str(bad.iloc[0]["plan_date"])
 
     for idx, move in enumerate(ai_strategy.get("moves", []), 1):
-        item_name = move.get("item")
+        item_name = str(move.get("item", "") or "")
         qty = int(move.get("qty", 0) or 0)
         to_loc = str(move.get("to", "") or "")
         from_loc = str(move.get("from", "") or "")
@@ -561,11 +649,19 @@ def step6_validate_ai_strategy(
         if "_" not in to_loc:
             violations.append(f"❌ [{idx}] {item_name}: 목적지 형식 오류 (to='{to_loc}')")
             continue
-
         to_date = to_loc.split("_", 1)[0].strip()
         to_line = to_loc.split("_", 1)[1].strip()
 
-        # 물리 제약
+        # 출발지 파싱(가능하면 수량 존재 검증에 사용)
+        from_date = None
+        from_line = None
+        if "_" in from_loc:
+            from_date = from_loc.split("_", 1)[0].strip()
+            from_line = from_loc.split("_", 1)[1].strip()
+
+        # -----------------------
+        # (1) 물리 제약
+        # -----------------------
         if item["is_a2xx"] and to_line == "조립3":
             violations.append(f"❌ [{idx}] {item_name}: A2XX는 조립3 이동 불가")
             continue
@@ -574,55 +670,97 @@ def step6_validate_ai_strategy(
             violations.append(f"❌ [{idx}] {item_name}: 전용 모델은 타라인 이동 불가 (요청 {to_line})")
             continue
 
-        # CAPA 확인/조정
+        # -----------------------
+        # (2) 가동일 (휴무일이면 즉시 컷)
+        # -----------------------
+        if not is_workday_in_db(plan_df, to_date):
+            violations.append(f"❌ [{idx}] {item_name}: {to_date}는 휴무일")
+            continue
+
+        # -----------------------
+        # (3) TODAY(질문일) 이전/당일 선행생산 금지
+        #     - '과거로 당기기'는 오늘 이후만 허용 (TODAY+1 ~ target_date-1)
+        # -----------------------
+        if today_str and to_date <= today_str:
+            violations.append(f"❌ [{idx}] {item_name}: 목적지 날짜({to_date})가 오늘({today_str}) 이전/당일이라 선행생산 금지")
+            continue
+
+        # -----------------------
+        # (4) 납기(=qty_0차) 기반 상한: last_due 이후로는 이동 금지
+        # -----------------------
+        last_due = _get_item_last_due(item_name)
+        if last_due and to_date > last_due:
+            violations.append(f"❌ [{idx}] {item_name}: 납기 이후 날짜로 이동 불가 (to {to_date} > last_due {last_due})")
+            continue
+
+        # -----------------------
+        # (5) 출발지 수량 존재 검증 (가능한 경우)
+        # -----------------------
+        if from_date and from_line:
+            src_qty = plan_df[
+                (plan_df["plan_date"] == from_date)
+                & (plan_df["line"] == from_line)
+                & (plan_df["product_name"] == item_name)
+            ]["qty_1차"].sum()
+            src_qty = int(src_qty) if pd.notna(src_qty) else 0
+            if src_qty < qty:
+                violations.append(f"❌ [{idx}] {item_name}: 출발지 수량 부족 (from {from_loc} 보유 {src_qty:,} < 요청 {qty:,})")
+                continue
+
+        # -----------------------
+        # (6) 목적지 CAPA 확인/조정
+        # -----------------------
         capa_key = f"{to_date}_{to_line}"
         if capa_key not in capa_status:
             violations.append(f"⚠️ [{idx}] {item_name}: 목적지 CAPA 정보 없음 ({capa_key})")
             continue
 
         dest = capa_status[capa_key]
-        if qty > int(dest["remaining"]):
+        final_qty = qty
+        adjusted = False
+        original_qty = None
+
+        if final_qty > int(dest["remaining"]):
             # 남은 CAPA 내에서 PLT 정수배로 줄여서라도 반영
             if int(dest["remaining"]) >= int(item["plt"]):
                 adj_plts = int(dest["remaining"]) // int(item["plt"])
                 adj_qty = adj_plts * int(item["plt"])
-                move["qty"] = adj_qty
-                move["plt"] = adj_plts
-                move["adjusted"] = True
-                move["original_qty"] = qty
-                capa_status[capa_key]["remaining"] -= adj_qty
-                violations.append(f"✅ [{idx}] {item_name}: CAPA 부족으로 자동 조정 ({qty:,} → {adj_qty:,})")
-                qty = adj_qty
+                final_qty = adj_qty
+                adjusted = True
+                original_qty = qty
             else:
                 violations.append(f"❌ [{idx}] {item_name}: CAPA 부족 및 조정 불가 (남은 {dest['remaining']:,})")
                 continue
-        else:
-            capa_status[capa_key]["remaining"] -= qty
-            move["adjusted"] = False
-            move["plt"] = qty // int(item["plt"])
 
-        # 가동일
-        if not is_workday_in_db(plan_df, to_date):
-            violations.append(f"❌ [{idx}] {item_name}: {to_date}는 휴무일")
-            continue
+        # -----------------------
+        # (7) 이동 적용 시 '누적 납기' 위반 여부 최종 검증
+        # -----------------------
+        if from_date:
+            ok, bad_date = _check_due_cumsum_after_move(item_name, from_date, to_date, final_qty)
+            if not ok:
+                violations.append(f"❌ [{idx}] {item_name}: 납기 누적 위반(이동 후 {bad_date}까지 생산 부족) → 이동 불가")
+                continue
 
-        # 통과
+        # ✅ 모든 검증 통과 후에만 CAPA 차감
+        capa_status[capa_key]["remaining"] -= final_qty
+
         validated.append(
             {
                 "item": item_name,
-                "qty": qty,
-                "plt": move.get("plt", qty // int(item["plt"])),
+                "qty": final_qty,
+                "plt": final_qty // int(item["plt"]),
                 "from": from_loc,
-                "to": to_loc,
+                "to": to_loc if not adjusted else f"{to_date}_{to_line}",
                 "reason": reason,
-                "adjusted": move.get("adjusted", False),
-                "original_qty": move.get("original_qty", None),
+                "adjusted": adjusted,
+                "original_qty": original_qty,
             }
         )
 
+        if adjusted:
+            violations.append(f"✅ [{idx}] {item_name}: CAPA 부족으로 자동 조정 ({qty:,} → {final_qty:,})")
+
     return validated, violations
-
-
 # ========================================================================
 # Python 폴백 전략 (AI 실패/부족 시)
 # ========================================================================
@@ -644,16 +782,31 @@ def python_fallback_reduce(
     """
     감축 폴백:
     1) T6, A2XX 타라인 같은날로 이동 (가능 CAPA)
-    2) 전용/잔여는 동일라인 미래 가동일로 연기
+    2) 전용/잔여는 동일라인 '미래' 가동일로 연기 (단, 데이터/납기 범위 밖으로는 확장하지 않음)
+    3) 그래도 부족하면 동일라인 '과거(=선행생산)' 가동일로 당기기 (TODAY 이전/당일 금지)
     """
-    moves = []
-    notes = []
+    moves: List[Dict[str, Any]] = []
+    notes: List[str] = []
 
     remain = need_reduce
     if remain <= 0:
         return [], []
 
     candidates = sorted(constraint_info, key=lambda x: x.get("buffer_days", 0), reverse=True)
+
+    # -------------------------------
+    # (0) 미래 확장 상한(horizon_end) 계산
+    # -------------------------------
+    horizon_end = None
+    if (not plan_df.empty) and ("plan_date" in plan_df.columns):
+        if "qty_0차" in plan_df.columns:
+            tmp = plan_df.copy()
+            tmp["qty_0차"] = pd.to_numeric(tmp["qty_0차"], errors="coerce").fillna(0)
+            due_df = tmp[tmp["qty_0차"] > 0]
+            if not due_df.empty:
+                horizon_end = str(due_df["plan_date"].max())[:10]
+        if not horizon_end:
+            horizon_end = str(plan_df["plan_date"].max())[:10]
 
     # [1] 같은날 타라인 이송
     for item in candidates:
@@ -697,6 +850,10 @@ def python_fallback_reduce(
             if take <= 0:
                 continue
 
+            # 가동일 체크(같은날이지만 혹시 데이터 상 휴무로 찍혔으면 차단)
+            if not is_workday_in_db(plan_df, question_date):
+                continue
+
             capa_status[f"{question_date}_{dl}"]["remaining"] -= take
             remain -= take
             moves.append(
@@ -710,9 +867,18 @@ def python_fallback_reduce(
                 }
             )
 
-    # [2] 동일라인 미래로 연기
+    # [2] 동일라인 미래로 연기 (먼저 시도)
     if remain > 0:
-        future_days = get_workdays_from_db(plan_df, question_date, direction="future", days_count=10)
+        max_future_days = 10
+
+        # DB is_workday 기준으로 horizon_end까지 가능한 미래 가동일을 넉넉히 모은 뒤
+        # max_future_days개까지만 사용 (horizon_end가 가까우면 자동 축소)
+        future_candidates = get_workdays_from_db(plan_df, question_date, direction="future", days_count=400)
+        future_candidates = [d for d in future_candidates if str(d)[:10] != question_date]
+        if horizon_end:
+            future_candidates = [d for d in future_candidates if str(d)[:10] <= horizon_end]
+        future_days = future_candidates[:max_future_days]
+
         if not future_days:
             notes.append("⚠️ [폴백] 미래 가동일 정보를 찾지 못했습니다 (is_workday 없음/데이터 범위 부족).")
 
@@ -757,12 +923,56 @@ def python_fallback_reduce(
                     }
                 )
 
+    # [3] 그래도 안 되면 과거(선행생산)로 당기기 (마지막 수단)
+    if remain > 0:
+        past_days = get_workdays_from_db(plan_df, question_date, direction="past", days_count=5)
+        # past_days는 get_workdays_from_db에서 TODAY 이후만 보장
+
+        for item in candidates:
+            if remain <= 0:
+                break
+
+            name = item["name"]
+            plt = int(item["plt"])
+            movable = int(item["max_movable"])
+            if movable < plt:
+                continue
+
+            for d in reversed(past_days):  # 가까운 날부터
+                if remain <= 0:
+                    break
+                key = f"{d}_{target_line}"
+                if key not in capa_status:
+                    continue
+                rem_capa = int(capa_status[key]["remaining"])
+                if rem_capa < plt:
+                    continue
+
+                take = min(remain, movable, rem_capa)
+                take = _pick_qty_plts(take, plt)
+                if take <= 0:
+                    continue
+
+                if not is_workday_in_db(plan_df, d):
+                    continue
+
+                capa_status[key]["remaining"] -= take
+                remain -= take
+                moves.append(
+                    {
+                        "item": name,
+                        "qty": take,
+                        "plt": take // plt,
+                        "from": f"{question_date}_{target_line}",
+                        "to": f"{d}_{target_line}",
+                        "reason": f"[폴백] 동일라인 선행생산으로 감축 ({d})",
+                    }
+                )
+
     if remain > 0:
         notes.append(f"⚠️ [폴백] 감축 미달: 추가로 {remain:,}개 더 감축 필요")
 
     return moves, notes
-
-
 def python_fallback_increase(
     plan_df: pd.DataFrame,
     constraint_info: List[Dict[str, Any]],
