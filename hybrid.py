@@ -30,11 +30,10 @@ import google.generativeai as genai
 TODAY = None
 CAPA_LIMITS = None
 
-# 데모/운영 가독성: 한 번에 너무 큰 이동을 방지 (수량/PLT 기준)
-MAX_SINGLE_MOVE_QTY = 1000        # 한 번의 move에서 허용하는 최대 수량(개) 상한(PLT 정수배로 내림)
-MAX_SINGLE_MOVE_PLTS = 5          # 한 번의 move에서 허용하는 최대 PLT 상한(아이템 PLT 기준)
 
 
+# 사람 같은 분산: T6 '같은날 타라인 이송'은 우선 1회, 최대 5PLT까지만 사용
+MAX_T6_SAMEDAY_SHIFT_PLTS = 5
 def initialize_globals(today, capa_limits):
     global TODAY, CAPA_LIMITS
     TODAY = today
@@ -616,69 +615,6 @@ def step5_ask_ai_strategy(
 # 6단계: Python 검증 (AI moves를 안전하게 필터/조정)
 # ========================================================================
 
-
-def _cap_and_split_moves(
-    moves: List[Dict[str, Any]],
-    constraint_info: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """AI/폴백이 제안한 moves에서 '한 번에 너무 큰 이동'을 방지.
-    - 아이템의 PLT 단위(plt)를 기준으로 MAX_SINGLE_MOVE_QTY, MAX_SINGLE_MOVE_PLTS 상한 적용
-    - 상한을 넘는 qty는 PLT 정수배로 쪼개서 여러 move로 분리
-    - 마지막 남은 수량이 1PLT 미만이면(PLT 단위 제약으로 어차피 불가) remainder는 남겨두고 다음 단계에서 다른 품목/날짜로 메우게 함
-    """
-    if not moves:
-        return []
-
-    name_to_item = {x.get("name"): x for x in (constraint_info or [])}
-    out: List[Dict[str, Any]] = []
-
-    for m in moves:
-        if not isinstance(m, dict):
-            continue
-        item_name = m.get("item") or m.get("name")
-        try:
-            qty = int(m.get("qty", 0))
-        except Exception:
-            qty = 0
-        if not item_name or qty <= 0:
-            continue
-
-        item = name_to_item.get(item_name) or {}
-        try:
-            plt = int(item.get("plt") or m.get("plt") or 1)
-        except Exception:
-            plt = 1
-        if plt <= 0:
-            plt = 1
-
-        cap_qty = int(MAX_SINGLE_MOVE_QTY)
-        cap_qty = min(cap_qty, int(MAX_SINGLE_MOVE_PLTS) * plt) if plt > 0 else cap_qty
-        cap_qty = max(plt, cap_qty)
-
-        remain = qty
-        while remain > 0:
-            chunk = min(remain, cap_qty)
-            # PLT 정수배로 내림
-            if plt > 1:
-                chunk = (chunk // plt) * plt
-            if chunk <= 0:
-                break
-
-            mm = dict(m)
-            mm["item"] = item_name
-            mm["qty"] = int(chunk)
-            mm["plt"] = int(chunk // plt)
-            out.append(mm)
-
-            remain -= int(chunk)
-            # 1PLT 미만 remainder는 다음 단계(다른 품목/날짜)에서 메우도록 남겨둠
-            if remain > 0 and remain < plt:
-                break
-
-    return out
-
-
-
 def step6_validate_ai_strategy(
     ai_strategy: Dict[str, Any],
     constraint_info: List[Dict[str, Any]],
@@ -692,6 +628,8 @@ def step6_validate_ai_strategy(
     name_to_item = {x["name"]: x for x in constraint_info}
     validated: List[Dict[str, Any]] = []
     violations: List[str] = []
+
+    t6_sameday_shift_used = False  # T6 같은날 타라인 이송은 1회만 허용
 
     today_str = TODAY.strftime("%Y-%m-%d") if TODAY else None
 
@@ -799,10 +737,29 @@ def step6_validate_ai_strategy(
             from_date = from_loc.split("_", 1)[0].strip()
             from_line = from_loc.split("_", 1)[1].strip()
 
-        # 동일 날짜/라인으로의 이동은 의미가 없고(Δ도 0), 집계 왜곡을 유발하므로 금지
+        # -----------------------
+        # (0) no-op 이동 방지 (같은 날짜/같은 라인으로의 이동은 의미 없음)
+        # - 이런 move가 들어오면 Δ 표에는 변화가 없는데, 감축량/달성률 집계가 왜곡될 수 있음
+        # -----------------------
         if from_date and from_line and (from_date == to_date) and (from_line == to_line):
-            violations.append(f"❌ [{idx}] {item_name}: 동일 위치 이동 불가 ({from_loc} → {to_loc})")
+            violations.append(f"❌ [{idx}] {item_name}: 같은 날짜/라인({to_date}_{to_line})로 이동(no-op) 불가")
             continue
+
+        # -----------------------
+        # (0.5) 사람 같은 분산: T6 같은날 타라인 이송은 1회만, 최대 5PLT까지만 우선 허용
+        # - 과대 이동(예: 6PLT, 1,050개)을 막고, 남는 감축은 다른 품목/날짜 이동을 우선 시도
+        # -----------------------
+        if item.get("is_t6") and from_date and from_line and (from_date == to_date) and (from_line != to_line):
+            if t6_sameday_shift_used:
+                violations.append(f"❌ [{idx}] {item_name}: T6 같은날 타라인 이송은 1회만 허용(사람 같은 분산)")
+                continue
+            max_qty = int(MAX_T6_SAMEDAY_SHIFT_PLTS) * int(item["plt"])
+            if qty > max_qty:
+                # qty/plt 정합성은 유지되도록 5PLT로 캡
+                original_qty = qty
+                qty = max_qty
+                move["qty"] = qty
+                violations.append(f"ℹ️ [{idx}] {item_name}: T6 과대 이동 방지(원본 {original_qty:,} → {qty:,}, {MAX_T6_SAMEDAY_SHIFT_PLTS}PLT 캡)")
 
         # -----------------------
         # (1) 물리 제약
@@ -902,6 +859,9 @@ def step6_validate_ai_strategy(
             }
         )
 
+
+        if item.get('is_t6') and from_date and from_line and (from_date == to_date) and (from_line != to_line):
+            t6_sameday_shift_used = True
         if adjusted:
             violations.append(f"✅ [{idx}] {item_name}: CAPA 부족으로 자동 조정 ({qty:,} → {final_qty:,})")
 
@@ -923,37 +883,45 @@ def python_fallback_reduce(
     question_date: str,
     target_line: str,
     need_reduce: int,
+    t6_sameday_already_used: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    감축 폴백:
-    1) T6, A2XX 타라인 같은날로 이동 (가능 CAPA)
-    2) 전용/잔여는 동일라인 '미래' 가동일로 연기 (단, 데이터/납기 범위 밖으로는 확장하지 않음)
-    3) 그래도 부족하면 동일라인 '과거(=선행생산)' 가동일로 당기기 (TODAY 이전/당일 금지)
+    감축 폴백 (사람 같은 분산 우선순위):
+    1) (우선 1회) T6 같은날 타라인 이송: 최대 5PLT까지만 사용 (과대 이동 방지)
+       - A2XX는 같은날 타라인 이송 가능(조립3 금지)하되, 전용(기타)은 타라인 금지
+    2) 남은 감축은 '비 T6' 품목의 동일라인 날짜 이동(미래 연기)부터 우선 시도
+    3) 그래도 부족하면 마지막에 T6의 동일라인 날짜 이동(미래 연기)
+    4) 그래도 부족하면 과거(선행생산)로 당기기 (TODAY 이전/당일 금지, 마지막 수단)
     """
     moves: List[Dict[str, Any]] = []
     notes: List[str] = []
 
-    remain = need_reduce
+    remain = int(need_reduce or 0)
     if remain <= 0:
         return [], []
 
+    # buffer_days 큰 순(납기 여유가 큰 품목 우선)
     candidates = sorted(constraint_info, key=lambda x: x.get("buffer_days", 0), reverse=True)
 
     # -------------------------------
-    # (0) 미래 확장 상한(horizon_end) 계산
+    # (0) 미래 확장 상한(horizon_end) 계산 (qty_0차 > 0인 마지막 납기일)
     # -------------------------------
     horizon_end = None
-    if (not plan_df.empty) and ("plan_date" in plan_df.columns):
-        if "qty_0차" in plan_df.columns:
+    if (not plan_df.empty) and ("plan_date" in plan_df.columns) and ("qty_0차" in plan_df.columns):
+        try:
             tmp = plan_df.copy()
             tmp["qty_0차"] = pd.to_numeric(tmp["qty_0차"], errors="coerce").fillna(0)
-            due_df = tmp[tmp["qty_0차"] > 0]
-            if not due_df.empty:
-                horizon_end = str(due_df["plan_date"].max())[:10]
-        if not horizon_end:
-            horizon_end = str(plan_df["plan_date"].max())[:10]
+            due = tmp[tmp["qty_0차"] > 0]["plan_date"]
+            if not due.empty:
+                horizon_end = str(due.max())[:10]
+        except Exception:
+            horizon_end = None
 
-    # [1] 같은날 타라인 이송
+    # ======================================================
+    # [1] 같은날 타라인 이송 (T6는 1회/5PLT 상한)
+    # ======================================================
+    t6_used_sameday = bool(t6_sameday_already_used)
+
     for item in candidates:
         if remain <= 0:
             break
@@ -964,23 +932,26 @@ def python_fallback_reduce(
         if movable < plt:
             continue
 
-        is_t6 = item["is_t6"]
-        is_a2xx = item["is_a2xx"]
+        is_t6 = bool(item.get("is_t6"))
+        is_a2xx = bool(item.get("is_a2xx"))
+
+        if is_t6 and t6_used_sameday:
+            continue
 
         if is_t6:
             possible_lines = [l for l in ["조립1", "조립2", "조립3"] if l != target_line]
         elif is_a2xx:
-            possible_lines = [l for l in ["조립1", "조립2"] if l != target_line]
+            possible_lines = [l for l in ["조립1", "조립2"] if l != target_line]  # 조립3 금지
         else:
             continue  # 전용은 타라인 금지
 
+        # 목적지 후보(같은날)
         dests = []
         for dl in possible_lines:
             key = f"{question_date}_{dl}"
-            if key in capa_status and capa_status[key]["remaining"] > 0:
+            if key in capa_status and int(capa_status[key]["remaining"]) > 0:
                 dests.append((dl, int(capa_status[key]["remaining"])))
         dests.sort(key=lambda x: x[1], reverse=True)
-
         if not dests:
             continue
 
@@ -991,11 +962,18 @@ def python_fallback_reduce(
                 continue
 
             take = min(remain, movable, rem_capa)
+
+            # T6는 같은날 타라인 이송을 '최대 5PLT'까지만 우선 사용
+            if is_t6:
+                take = min(take, int(MAX_T6_SAMEDAY_SHIFT_PLTS) * plt)
+
             take = _pick_qty_plts(take, plt)
             if take <= 0:
                 continue
 
-            # 가동일 체크(같은날이지만 혹시 데이터 상 휴무로 찍혔으면 차단)
+            # 가동일 체크
+            if not is_workday_in_db(plan_df, question_date):
+                continue
             if not is_workday_in_db(plan_df, question_date):
                 continue
 
@@ -1012,12 +990,16 @@ def python_fallback_reduce(
                 }
             )
 
-    # [2] 동일라인 미래로 연기 (먼저 시도)
+            if is_t6:
+                t6_used_sameday = True
+            break  # 같은 품목은 1건만(사람 같은 플로우)
+
+    # ======================================================
+    # [2] 동일라인 미래로 연기 (비 T6 먼저)
+    # ======================================================
     if remain > 0:
         max_future_days = 10
 
-        # DB is_workday 기준으로 horizon_end까지 가능한 미래 가동일을 넉넉히 모은 뒤
-        # max_future_days개까지만 사용 (horizon_end가 가까우면 자동 축소)
         future_candidates = get_workdays_from_db(plan_df, question_date, direction="future", days_count=400)
         future_candidates = [d for d in future_candidates if str(d)[:10] != question_date]
         if horizon_end:
@@ -1026,52 +1008,93 @@ def python_fallback_reduce(
 
         if not future_days:
             notes.append("⚠️ [폴백] 미래 가동일 정보를 찾지 못했습니다 (is_workday 없음/데이터 범위 부족).")
-
-        for item in candidates:
-            if remain <= 0:
-                break
-
-            name = item["name"]
-            plt = int(item["plt"])
-            movable = int(item["max_movable"])
-            if movable < plt:
-                continue
-
-            for d in future_days:
+        else:
+            # (2-a) 비 T6 먼저
+            for item in [x for x in candidates if not x.get("is_t6")]:
                 if remain <= 0:
                     break
-                key = f"{d}_{target_line}"
-                if key not in capa_status:
-                    continue
-                rem_capa = int(capa_status[key]["remaining"])
-                if rem_capa < plt:
-                    continue
 
-                take = min(remain, movable, rem_capa)
-                take = _pick_qty_plts(take, plt)
-                if take <= 0:
+                name = item["name"]
+                plt = int(item["plt"])
+                movable = int(item["max_movable"])
+                if movable < plt:
                     continue
 
-                if not is_workday_in_db(plan_df, d):
-                    continue
+                for d in future_days:
+                    if remain <= 0:
+                        break
+                    key = f"{d}_{target_line}"
+                    if key not in capa_status:
+                        continue
+                    rem_capa = int(capa_status[key]["remaining"])
+                    if rem_capa < plt:
+                        continue
 
-                capa_status[key]["remaining"] -= take
-                remain -= take
-                moves.append(
-                    {
-                        "item": name,
-                        "qty": take,
-                        "plt": take // plt,
-                        "from": f"{question_date}_{target_line}",
-                        "to": f"{d}_{target_line}",
-                        "reason": f"[폴백] 동일라인 미래 연기로 감축 ({d})",
-                    }
-                )
+                    take = min(remain, movable, rem_capa)
+                    take = _pick_qty_plts(take, plt)
+                    if take <= 0:
+                        continue
 
-    # [3] 그래도 안 되면 과거(선행생산)로 당기기 (마지막 수단)
+                    capa_status[key]["remaining"] -= take
+                    remain -= take
+                    moves.append(
+                        {
+                            "item": name,
+                            "qty": take,
+                            "plt": take // plt,
+                            "from": f"{question_date}_{target_line}",
+                            "to": f"{d}_{target_line}",
+                            "reason": f"[폴백] 동일라인 미래 연기로 감축 ({d})",
+                        }
+                    )
+                    break  # 한 품목은 1건만
+
+            # (2-b) 그래도 부족하면 마지막에 T6 동일라인 미래 연기
+            if remain > 0:
+                for item in [x for x in candidates if x.get("is_t6")]:
+                    if remain <= 0:
+                        break
+
+                    name = item["name"]
+                    plt = int(item["plt"])
+                    movable = int(item["max_movable"])
+                    if movable < plt:
+                        continue
+
+                    for d in future_days:
+                        if remain <= 0:
+                            break
+                        key = f"{d}_{target_line}"
+                        if key not in capa_status:
+                            continue
+                        rem_capa = int(capa_status[key]["remaining"])
+                        if rem_capa < plt:
+                            continue
+
+                        take = min(remain, movable, rem_capa)
+                        take = _pick_qty_plts(take, plt)
+                        if take <= 0:
+                            continue
+
+                        capa_status[key]["remaining"] -= take
+                        remain -= take
+                        moves.append(
+                            {
+                                "item": name,
+                                "qty": take,
+                                "plt": take // plt,
+                                "from": f"{question_date}_{target_line}",
+                                "to": f"{d}_{target_line}",
+                                "reason": f"[폴백] (보조) T6 동일라인 미래 연기로 감축 ({d})",
+                            }
+                        )
+                        break
+
+    # ======================================================
+    # [3] 과거(선행생산)로 당기기 (마지막 수단)
+    # ======================================================
     if remain > 0:
         past_days = get_workdays_from_db(plan_df, question_date, direction="past", days_count=5)
-        # past_days는 get_workdays_from_db에서 TODAY 이후만 보장
 
         for item in candidates:
             if remain <= 0:
@@ -1083,7 +1106,7 @@ def python_fallback_reduce(
             if movable < plt:
                 continue
 
-            for d in reversed(past_days):  # 가까운 날부터
+            for d in past_days:
                 if remain <= 0:
                     break
                 key = f"{d}_{target_line}"
@@ -1098,9 +1121,6 @@ def python_fallback_reduce(
                 if take <= 0:
                     continue
 
-                if not is_workday_in_db(plan_df, d):
-                    continue
-
                 capa_status[key]["remaining"] -= take
                 remain -= take
                 moves.append(
@@ -1110,14 +1130,13 @@ def python_fallback_reduce(
                         "plt": take // plt,
                         "from": f"{question_date}_{target_line}",
                         "to": f"{d}_{target_line}",
-                        "reason": f"[폴백] 동일라인 선행생산으로 감축 ({d})",
+                        "reason": f"[폴백] 과거 선행생산으로 당기기 ({d})",
                     }
                 )
-
-    if remain > 0:
-        notes.append(f"⚠️ [폴백] 감축 미달: 추가로 {remain:,}개 더 감축 필요")
+                break
 
     return moves, notes
+
 def python_fallback_increase(
     plan_df: pd.DataFrame,
     constraint_info: List[Dict[str, Any]],
@@ -1512,9 +1531,6 @@ def ask_professional_scheduler(
         strategy_source = "Python 폴백 (AI 오류)"
 
     # 6) 검증
-    # 한 번에 너무 큰 이동(>약 1,000개/5PLT)을 방지하도록 move를 분할/상한 적용
-    ai_strategy["moves"] = _cap_and_split_moves(ai_strategy.get("moves", []), constraint_info)
-
     final_moves, violations = step6_validate_ai_strategy(
         ai_strategy=ai_strategy,
         constraint_info=constraint_info,
@@ -1541,6 +1557,13 @@ def ask_professional_scheduler(
         sim_capa = deepcopy(capa_status)
 
         if operation_mode == "reduce":
+            t6_sameday_used_now = any(
+                (str(x.get('item')) == 'T6 (P703) 수원(U725)')
+                and (str(x.get('from','')) == f"{question_date}_{target_line}")
+                and str(x.get('to','')).startswith(f"{question_date}_")
+                and (str(x.get('to','')).split('_',1)[1] != target_line)
+                for x in final_moves
+            )
             fb_moves, fb_notes = python_fallback_reduce(
                 plan_df=plan_df,
                 constraint_info=constraint_info,
@@ -1548,6 +1571,7 @@ def ask_professional_scheduler(
                 question_date=question_date,
                 target_line=target_line,
                 need_reduce=remaining,
+                t6_sameday_already_used=t6_sameday_used_now,
             )
         else:
             fb_moves, fb_notes = python_fallback_increase(
@@ -1565,7 +1589,6 @@ def ask_professional_scheduler(
 
         if fb_moves:
             fb_strategy = {"strategy": "Python 폴백 채움", "explanation": "AI 부족분을 기본 로직으로 보완", "moves": fb_moves}
-            fb_strategy["moves"] = _cap_and_split_moves(fb_strategy.get("moves", []), constraint_info)
             fb_valid, fb_viol = step6_validate_ai_strategy(
                 ai_strategy=fb_strategy,
                 constraint_info=constraint_info,
@@ -1589,7 +1612,7 @@ def ask_professional_scheduler(
     baseline_achievement = (baseline_done / operation_qty * 100) if operation_qty else 0
     baseline_shortfall = max(0, operation_qty - baseline_done)
 
-    auto_threshold = 70.0  # 데모용: 70% 미만이면 운영 대안(잔업/특근) 시뮬레이션
+    auto_threshold = 85.0  # 데모용: 달성률이 낮으면(기본 85% 미만) 운영 대안(잔업/특근) 시뮬레이션
     if operation_mode == "reduce" and baseline_shortfall > 0 and baseline_achievement < auto_threshold:
         capa_related_fail = any(("CAPA 부족" in v or "조정 불가" in v) for v in violations)
         if capa_related_fail:
@@ -1624,6 +1647,13 @@ def ask_professional_scheduler(
                     fb_attempts2 += 1
                     sim2 = deepcopy(capa_status2)
 
+                    t6_sameday_used_now2 = any(
+                        (str(x.get('item')) == 'T6 (P703) 수원(U725)')
+                        and (str(x.get('from','')) == f"{question_date}_{target_line}")
+                        and str(x.get('to','')).startswith(f"{question_date}_")
+                        and (str(x.get('to','')).split('_',1)[1] != target_line)
+                        for x in final2
+                    )
                     fb_moves2, fb_notes_tmp = python_fallback_reduce(
                         plan_df=plan_df,
                         constraint_info=constraint_info,
@@ -1631,6 +1661,7 @@ def ask_professional_scheduler(
                         question_date=question_date,
                         target_line=target_line,
                         need_reduce=remaining2,
+                        t6_sameday_already_used=t6_sameday_used_now2,
                     )
 
                     fb_notes2.extend([n for n in (fb_notes_tmp or []) if "미달" not in n])
