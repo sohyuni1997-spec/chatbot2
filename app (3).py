@@ -3,7 +3,6 @@ import pandas as pd
 from supabase import create_client, Client
 import google.generativeai as genai
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 import plotly.graph_objects as go
 import re
 import base64
@@ -415,9 +414,10 @@ supabase: Client = init_supabase()
 genai.configure(api_key=GENAI_KEY)
 
 CAPA_LIMITS = {"조립1": 3300, "조립2": 3700, "조립3": 3600}
-TEST_MODE = False  # 배포 기본값
-SEOUL_TZ = ZoneInfo("Asia/Seoul")
-TODAY = datetime.now(SEOUL_TZ).date() if not TEST_MODE else datetime(2026, 1, 5).date()
+TEST_MODE = True
+TODAY = datetime(2026, 1, 5).date() if TEST_MODE else datetime.now().date()
+
+
 # ==================== 데이터 로드 (기존 유지) ====================
 @st.cache_data(ttl=600)
 def fetch_data(target_date=None):
@@ -682,26 +682,39 @@ def split_report_sections(report_md: str) -> dict:
 
 
 def build_action_md(report_md: str) -> str:
-    """채팅에 표시할 '최종 조치 계획'만 마크다운 텍스트로 구성"""
+    """채팅에 표시할 '최종 조치 계획' + (있으면) 'CAPA 이벤트'를 마크다운으로 구성"""
     sections = split_report_sections(report_md)
+
+    # (A) CAPA 이벤트 섹션(방법 A: Δ 표 밖에서만 표시)
+    event_key = next((k for k in sections.keys() if "CAPA 이벤트" in k), None)
+    event_body = sections.get(event_key, "").strip()
+
+    # (B) 최종 조치 계획 섹션
     action_key = next((k for k in sections.keys() if "최종 조치 계획" in k), None)
     action_body = sections.get(action_key, "").strip()
 
     if not action_body:
-        return "## 🧾 최종 조치 계획\n(조치계획 없음)"
+        action_md = "## 🧾 최종 조치 계획\n(조치계획 없음)"
+    else:
+        # 조치계획이 표로 나오면 legacy엔 문제 없지만, hybrid 목표는 리스트 텍스트이므로 표 라인 제거(선택)
+        if ("|---" in action_body) and re.search(r"^\s*\|.*\|\s*$", action_body, re.MULTILINE):
+            filtered = []
+            for ln in action_body.splitlines():
+                if re.search(r"^\s*\|.*\|\s*$", ln):
+                    continue
+                if re.search(r"^\s*\|\s*-{3,}", ln):
+                    continue
+                filtered.append(ln)
+            action_body = "\n".join(filtered).strip()
 
-    # 조치계획이 표로 나오면 legacy엔 문제 없지만, hybrid 목표는 리스트 텍스트이므로 표 라인 제거(선택)
-    if ("|---" in action_body) and re.search(r"^\s*\|.*\|\s*$", action_body, re.MULTILINE):
-        filtered = []
-        for ln in action_body.splitlines():
-            if re.search(r"^\s*\|.*\|\s*$", ln):
-                continue
-            if re.search(r"^\s*\|\s*-{3,}", ln):
-                continue
-            filtered.append(ln)
-        action_body = "\n".join(filtered).strip()
+        action_md = "## 🧾 최종 조치 계획\n" + action_body
 
-    return "## 🧾 최종 조치 계획\n" + action_body
+    if event_body and event_key:
+        # event_key에는 이미 '🛠'가 포함될 수 있음 → 그대로 제목으로 사용
+        event_md = f"## {event_key}\n" + event_body
+        return event_md + "\n\n" + action_md
+
+    return action_md
 
 
 # ✅✅ hybrid Δ: 말풍선 내부용 HTML 테이블 생성
@@ -815,7 +828,7 @@ def render_hybrid_details_tabs(report_md: str, plan_df: pd.DataFrame | None = No
                     margin=dict(l=20, r=20, t=40, b=20),
                 )
 
-                st.plotly_chart(fig, use_container_width=True, key=f"capa_chart_{abs(hash(report_md)) % 10**8}")
+                st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(daily, use_container_width=True)
             else:
                 st.info("CAPA 그래프를 그릴 데이터가 없습니다.")
